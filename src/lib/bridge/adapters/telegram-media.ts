@@ -6,8 +6,8 @@
  * directly into the existing streamClaude vision pipeline.
  */
 
-import type { FileAttachment } from '../types';
-import { getBridgeContext } from '../context';
+import type { FileAttachment } from '../types.js';
+import { getBridgeContext } from '../context.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 

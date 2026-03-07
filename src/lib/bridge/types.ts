@@ -7,7 +7,7 @@
  */
 
 // Re-export bridge-local types from host.ts so consumers can import from one place
-export type { FileAttachment } from './host';
+export type { FileAttachment } from './host.js';
 
 // ── Channel Types ──────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ export interface InboundMessage {
   /** Adapter-specific update ID for deferred offset acknowledgement */
   updateId?: number;
   /** File attachments (images, documents) from the IM channel */
-  attachments?: import('./host').FileAttachment[];
+  attachments?: import('./host.js').FileAttachment[];
 }
 
 /** Outbound message to send to an IM channel */

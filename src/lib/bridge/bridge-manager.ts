@@ -7,26 +7,26 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState } from './types';
-import { createAdapter, getRegisteredTypes } from './channel-adapter';
-import type { BaseChannelAdapter } from './channel-adapter';
+import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState } from './types.js';
+import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
+import type { BaseChannelAdapter } from './channel-adapter.js';
 // Side-effect import: triggers self-registration of all adapter factories
-import './adapters';
-import * as router from './channel-router';
-import * as engine from './conversation-engine';
-import * as broker from './permission-broker';
-import { deliver, deliverRendered } from './delivery-layer';
-import { markdownToTelegramChunks } from './markdown/telegram';
-import { markdownToDiscordChunks } from './markdown/discord';
-import { getBridgeContext } from './context';
-import { escapeHtml } from './adapters/telegram-utils';
+import './adapters/index.js';
+import * as router from './channel-router.js';
+import * as engine from './conversation-engine.js';
+import * as broker from './permission-broker.js';
+import { deliver, deliverRendered } from './delivery-layer.js';
+import { markdownToTelegramChunks } from './markdown/telegram.js';
+import { markdownToDiscordChunks } from './markdown/discord.js';
+import { getBridgeContext } from './context.js';
+import { escapeHtml } from './adapters/telegram-utils.js';
 import {
   validateWorkingDirectory,
   validateSessionId,
   isDangerousInput,
   sanitizeInput,
   validateMode,
-} from './security/validators';
+} from './security/validators.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
 
@@ -84,7 +84,7 @@ function flushPreview(
 
 // ── Channel-aware rendering dispatch ──────────────────────────
 
-import type { ChannelAddress, SendResult } from './types';
+import type { ChannelAddress, SendResult } from './types.js';
 
 /**
  * Render response text and deliver via the appropriate channel format.

@@ -9,7 +9,7 @@
  * bridge-manager.ts imports this module; it never needs to change for new adapters.
  */
 
-import './telegram-adapter';
-import './feishu-adapter';
-import './discord-adapter';
-import './qq-adapter';
+import './telegram-adapter.js';
+import './feishu-adapter.js';
+import './discord-adapter.js';
+import './qq-adapter.js';

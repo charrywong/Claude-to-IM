@@ -1,4 +1,4 @@
-import type { MarkdownIR, MarkdownLinkSpan, MarkdownStyle, MarkdownStyleSpan } from './ir';
+import type { MarkdownIR, MarkdownLinkSpan, MarkdownStyle, MarkdownStyleSpan } from './ir.js';
 
 export type RenderStyleMarker = {
   open: string;

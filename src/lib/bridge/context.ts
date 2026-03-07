@@ -13,7 +13,7 @@ import type {
   LLMProvider,
   PermissionGateway,
   LifecycleHooks,
-} from './host';
+} from './host.js';
 
 export interface BridgeContext {
   store: BridgeStore;

@@ -9,12 +9,12 @@ import type {
   OutboundMessage,
   SendResult,
   PLATFORM_LIMITS,
-} from './types';
-import type { TelegramChunk } from './markdown/telegram';
-import { PLATFORM_LIMITS as limits } from './types';
-import type { BaseChannelAdapter } from './channel-adapter';
-import { getBridgeContext } from './context';
-import { ChatRateLimiter } from './security/rate-limiter';
+} from './types.js';
+import type { TelegramChunk } from './markdown/telegram.js';
+import { PLATFORM_LIMITS as limits } from './types.js';
+import type { BaseChannelAdapter } from './channel-adapter.js';
+import { getBridgeContext } from './context.js';
+import { ChatRateLimiter } from './security/rate-limiter.js';
 
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;

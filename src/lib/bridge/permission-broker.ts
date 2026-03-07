@@ -10,11 +10,11 @@
  */
 
 import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
-import type { ChannelAddress, OutboundMessage } from './types';
-import type { BaseChannelAdapter } from './channel-adapter';
-import { deliver } from './delivery-layer';
-import { getBridgeContext } from './context';
-import { escapeHtml } from './adapters/telegram-utils';
+import type { ChannelAddress, OutboundMessage } from './types.js';
+import type { BaseChannelAdapter } from './channel-adapter.js';
+import { deliver } from './delivery-layer.js';
+import { getBridgeContext } from './context.js';
+import { escapeHtml } from './adapters/telegram-utils.js';
 
 /**
  * Dedup recent permission forwards to prevent duplicate cards.
@@ -57,7 +57,7 @@ export async function forwardPermissionRequest(
     ? inputStr.slice(0, 300) + '...'
     : inputStr;
 
-  let result: import('./types').SendResult;
+  let result: import('./types.js').SendResult;
 
   if (adapter.channelType === 'qq') {
     // QQ: plain text permission prompt with copyable /perm commands (no inline buttons)

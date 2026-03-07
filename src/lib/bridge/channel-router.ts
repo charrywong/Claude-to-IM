@@ -5,8 +5,8 @@
  * the corresponding ChannelBinding (and underlying chat_session).
  */
 
-import type { ChannelAddress, ChannelBinding, ChannelType } from './types';
-import { getBridgeContext } from './context';
+import type { ChannelAddress, ChannelBinding, ChannelType } from './types.js';
+import { getBridgeContext } from './context.js';
 
 /**
  * Resolve an inbound address to a ChannelBinding.

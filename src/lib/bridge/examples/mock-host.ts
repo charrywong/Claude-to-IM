@@ -15,9 +15,9 @@
  * 4. Simulates processing a message through the pipeline
  */
 
-import { initBridgeContext } from '../context';
-import * as router from '../channel-router';
-import * as engine from '../conversation-engine';
+import { initBridgeContext } from '../context.js';
+import * as router from '../channel-router.js';
+import * as engine from '../conversation-engine.js';
 import type {
   BridgeStore,
   LLMProvider,
@@ -26,8 +26,8 @@ import type {
   StreamChatParams,
   BridgeSession,
   BridgeMessage,
-} from '../host';
-import type { ChannelBinding, ChannelType } from '../types';
+} from '../host.js';
+import type { ChannelBinding, ChannelType } from '../types.js';
 
 // ── In-memory Store ─────────────────────────────────────────
 

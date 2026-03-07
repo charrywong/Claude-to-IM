@@ -7,8 +7,8 @@
  * Ported from openclaw src/telegram/format.ts.
  */
 
-import { markdownToIR, chunkMarkdownIR, type MarkdownIR, type MarkdownLinkSpan } from './ir';
-import { renderMarkdownWithMarkers } from './render';
+import { markdownToIR, chunkMarkdownIR, type MarkdownIR, type MarkdownLinkSpan } from './ir.js';
+import { renderMarkdownWithMarkers } from './render.js';
 
 export type TelegramChunk = {
   html: string;

@@ -12,19 +12,19 @@ import type {
   OutboundMessage,
   PreviewCapabilities,
   SendResult,
-} from '../types';
-import type { FileAttachment } from '../types';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
-import { getBridgeContext } from '../context';
-import { callTelegramApi, sendMessageDraft } from './telegram-utils';
+} from '../types.js';
+import type { FileAttachment } from '../types.js';
+import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
+import { getBridgeContext } from '../context.js';
+import { callTelegramApi, sendMessageDraft } from './telegram-utils.js';
 import {
   isImageEnabled,
   downloadPhoto,
   downloadDocumentImage,
   isSupportedImageMime,
   inferMimeType,
-} from './telegram-media';
-import type { TelegramPhotoSize, TelegramDocument, MediaDownloadResult } from './telegram-media';
+} from './telegram-media.js';
+import type { TelegramPhotoSize, TelegramDocument, MediaDownloadResult } from './telegram-media.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 

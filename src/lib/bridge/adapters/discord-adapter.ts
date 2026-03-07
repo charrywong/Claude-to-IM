@@ -18,10 +18,10 @@ import type {
   OutboundMessage,
   PreviewCapabilities,
   SendResult,
-} from '../types';
-import type { FileAttachment } from '../types';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter';
-import { getBridgeContext } from '../context';
+} from '../types.js';
+import type { FileAttachment } from '../types.js';
+import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
+import { getBridgeContext } from '../context.js';
 
 /** Max number of message IDs to keep for dedup. */
 const DEDUP_MAX = 1000;
