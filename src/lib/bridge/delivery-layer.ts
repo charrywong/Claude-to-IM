@@ -26,7 +26,8 @@ const INTER_CHUNK_DELAY_MS = 300;
 const rateLimiter = new ChatRateLimiter();
 
 // Periodically clean up idle rate limiter buckets (every 5 minutes).
-setInterval(() => { rateLimiter.cleanup(); }, 5 * 60_000);
+// unref() so the timer doesn't prevent Node.js process exit (e.g. in tests).
+setInterval(() => { rateLimiter.cleanup(); }, 5 * 60_000).unref();
 
 /**
  * Split text into chunks that fit within a platform's message size limit.

@@ -184,12 +184,13 @@ function processWithSessionLock(sessionId: string, fn: () => Promise<void>): Pro
   const prev = state.sessionLocks.get(sessionId) || Promise.resolve();
   const current = prev.then(fn, fn);
   state.sessionLocks.set(sessionId, current);
-  // Cleanup when the chain completes
+  // Cleanup when the chain completes.
+  // Suppress rejection on the cleanup chain — callers handle errors on `current` directly.
   current.finally(() => {
     if (state.sessionLocks.get(sessionId) === current) {
       state.sessionLocks.delete(sessionId);
     }
-  });
+  }).catch(() => {});
   return current;
 }
 
@@ -444,7 +445,21 @@ async function handleMessage(
 
   const rawText = msg.text.trim();
   const hasAttachments = msg.attachments && msg.attachments.length > 0;
-  if (!rawText && !hasAttachments) { ack(); return; }
+
+  // Handle image-only download failures — surface error to user instead of silently dropping
+  if (!rawText && !hasAttachments) {
+    const rawData = msg.raw as { imageDownloadFailed?: boolean; failedCount?: number } | undefined;
+    if (rawData?.imageDownloadFailed) {
+      await deliver(adapter, {
+        address: msg.address,
+        text: `Failed to download ${rawData.failedCount ?? 1} image(s). Please try sending again.`,
+        parseMode: 'plain',
+        replyToMessageId: msg.messageId,
+      });
+    }
+    ack();
+    return;
+  }
 
   // Check for IM commands (before sanitization — commands are validated individually)
   if (rawText.startsWith('/')) {

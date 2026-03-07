@@ -135,24 +135,28 @@ export class QQAdapter extends BaseChannelAdapter {
       return { ok: false, error: 'Missing replyToMessageId for QQ passive reply' };
     }
 
-    const store = getBridgeContext().store;
-    const appId = store.getSetting('bridge_qq_app_id') || '';
-    const appSecret = store.getSetting('bridge_qq_app_secret') || '';
+    try {
+      const store = getBridgeContext().store;
+      const appId = store.getSetting('bridge_qq_app_id') || '';
+      const appSecret = store.getSetting('bridge_qq_app_secret') || '';
 
-    const token = await getAccessToken(appId, appSecret);
-    const msgSeq = nextMsgSeq(message.replyToMessageId);
+      const token = await getAccessToken(appId, appSecret);
+      const msgSeq = nextMsgSeq(message.replyToMessageId);
 
-    let content = message.text;
-    if (message.parseMode === 'HTML') {
-      content = content.replace(/<[^>]+>/g, '');
+      let content = message.text;
+      if (message.parseMode === 'HTML') {
+        content = content.replace(/<[^>]+>/g, '');
+      }
+
+      return await sendPrivateMessage(token, {
+        openid: message.address.chatId,
+        content,
+        msgId: message.replyToMessageId,
+        msgSeq,
+      });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
-
-    return sendPrivateMessage(token, {
-      openid: message.address.chatId,
-      content,
-      msgId: message.replyToMessageId,
-      msgSeq,
-    });
   }
 
   // ── Config & Auth ───────────────────────────────────────────
@@ -329,21 +333,49 @@ export class QQAdapter extends BaseChannelAdapter {
 
     if (imageAttachments.length > 0) {
       // Download images async, then enqueue
-      this.downloadImages(imageAttachments).then((files) => {
-        const inbound: InboundMessage = {
-          messageId: data.id,
-          address,
-          text,
-          timestamp: data.timestamp ? new Date(data.timestamp).getTime() : Date.now(),
-          attachments: files.length > 0 ? files : undefined,
-        };
-        this.enqueue(inbound);
+      this.downloadImages(imageAttachments).then((result) => {
+        const { files, failedCount } = result;
+        const ts = data.timestamp ? new Date(data.timestamp).getTime() : Date.now();
+
+        if (files.length > 0) {
+          // At least some images succeeded — enqueue with attachments
+          const errorNote = failedCount > 0 ? `\n[${failedCount} image(s) failed to download]` : '';
+          const inbound: InboundMessage = {
+            messageId: data.id,
+            address,
+            text: text + errorNote,
+            timestamp: ts,
+            attachments: files,
+          };
+          this.enqueue(inbound);
+        } else if (text) {
+          // All images failed but there is text — enqueue text only with a note
+          const inbound: InboundMessage = {
+            messageId: data.id,
+            address,
+            text: text + `\n[${failedCount} image(s) failed to download]`,
+            timestamp: ts,
+          };
+          this.enqueue(inbound);
+        } else {
+          // Image-only message and all downloads failed — enqueue an error
+          // so bridge-manager can reply to the user instead of silently dropping
+          const inbound: InboundMessage = {
+            messageId: data.id,
+            address,
+            text: '',
+            timestamp: ts,
+            // Store failure info so handleMessage can surface it
+            raw: { imageDownloadFailed: true, failedCount },
+          };
+          this.enqueue(inbound);
+        }
 
         // Audit log
         try {
           const summary = files.length > 0
             ? `[${files.length} image(s)] ${text.slice(0, 150)}`
-            : text.slice(0, 200);
+            : `[${failedCount} image(s) failed] ${text.slice(0, 150)}`;
           getBridgeContext().store.insertAuditLog({
             channelType: 'qq',
             chatId: userId,
@@ -352,16 +384,6 @@ export class QQAdapter extends BaseChannelAdapter {
             summary,
           });
         } catch { /* best effort */ }
-      }).catch((err) => {
-        console.error('[qq-adapter] Image download error:', err instanceof Error ? err.message : err);
-        // Enqueue without attachments
-        const inbound: InboundMessage = {
-          messageId: data.id,
-          address,
-          text: text || '[image download failed]',
-          timestamp: data.timestamp ? new Date(data.timestamp).getTime() : Date.now(),
-        };
-        this.enqueue(inbound);
       });
     } else {
       if (!text) return;
@@ -391,14 +413,15 @@ export class QQAdapter extends BaseChannelAdapter {
 
   private async downloadImages(
     attachments: QQAttachment[],
-  ): Promise<FileAttachment[]> {
+  ): Promise<{ files: FileAttachment[]; failedCount: number }> {
     const maxSizeMB = parseInt(
       getBridgeContext().store.getSetting('bridge_qq_max_image_size') || '20',
       10,
     ) || 20;
     const maxSizeBytes = maxSizeMB * 1024 * 1024;
 
-    const results: FileAttachment[] = [];
+    const files: FileAttachment[] = [];
+    let failedCount = 0;
 
     for (const att of attachments) {
       try {
@@ -411,6 +434,7 @@ export class QQAdapter extends BaseChannelAdapter {
         // Check declared size before downloading
         if (att.size && att.size > maxSizeBytes) {
           console.warn(`[qq-adapter] Image too large (${att.size} bytes), skipping: ${att.filename || 'unnamed'}`);
+          failedCount++;
           continue;
         }
 
@@ -420,6 +444,7 @@ export class QQAdapter extends BaseChannelAdapter {
 
         if (!res.ok) {
           console.warn(`[qq-adapter] Image download failed (${res.status}): ${url}`);
+          failedCount++;
           continue;
         }
 
@@ -427,16 +452,18 @@ export class QQAdapter extends BaseChannelAdapter {
 
         if (buffer.length > maxSizeBytes) {
           console.warn(`[qq-adapter] Downloaded image too large (${buffer.length} bytes), skipping`);
+          failedCount++;
           continue;
         }
 
         if (buffer.length === 0) {
           console.warn('[qq-adapter] Downloaded image is empty, skipping');
+          failedCount++;
           continue;
         }
 
         const name = att.filename || `image_${crypto.randomUUID().slice(0, 8)}.png`;
-        results.push({
+        files.push({
           id: crypto.randomUUID(),
           name,
           type: att.content_type || 'image/png',
@@ -445,10 +472,11 @@ export class QQAdapter extends BaseChannelAdapter {
         });
       } catch (err) {
         console.warn('[qq-adapter] Image download error:', err instanceof Error ? err.message : err);
+        failedCount++;
       }
     }
 
-    return results;
+    return { files, failedCount };
   }
 
   // ── Heartbeat ───────────────────────────────────────────────
