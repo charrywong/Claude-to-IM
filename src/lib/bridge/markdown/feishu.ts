@@ -121,12 +121,33 @@ export function formatElapsed(ms: number): string {
  * Combines main text content with tool progress.
  */
 export function buildStreamingContent(text: string, tools: ToolCallInfo[]): string {
-  let content = text || '';
-  const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
-  return content || '💭 Thinking...';
+  void tools;
+  return text || '💭 Thinking...';
+}
+
+/**
+ * Build the full streaming card JSON (schema 2.0) for incremental updates.
+ */
+export function buildStreamingCardJson(text: string, tools: ToolCallInfo[]): string {
+  return JSON.stringify({
+    schema: '2.0',
+    config: {
+      streaming_mode: true,
+      wide_screen_mode: true,
+      summary: { content: '思考中...' },
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: preprocessFeishuMarkdown(buildStreamingContent(text, tools)),
+          text_align: 'left',
+          text_size: 'normal',
+          element_id: 'streaming_content',
+        },
+      ],
+    },
+  });
 }
 
 /**
@@ -141,10 +162,7 @@ export function buildFinalCardJson(
 
   // Main text content
   let content = preprocessFeishuMarkdown(text);
-  const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
+  void tools;
 
   if (content) {
     elements.push({

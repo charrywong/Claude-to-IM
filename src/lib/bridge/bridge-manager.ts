@@ -692,8 +692,16 @@ async function handleMessage(
   try {
     // Pass permission callback so requests are forwarded to IM immediately
     // during streaming (the stream blocks until permission is resolved).
-    // Use text or empty string for image-only messages (prompt is still required by streamClaude)
-    const promptText = text || (hasAttachments ? 'Describe this image.' : '');
+    // Use a synthetic prompt for attachment-only messages.
+    // Images keep the old behavior; non-image files get a generic inspection prompt.
+    const promptText = text || (() => {
+      if (!hasAttachments) return '';
+      const attachments = msg.attachments || [];
+      const allImages = attachments.length > 0 && attachments.every((a) => a.type.startsWith('image/'));
+      return allImages
+        ? 'Describe this image.'
+        : 'Inspect the attached file(s) and help the user with them.';
+    })();
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       await broker.forwardPermissionRequest(

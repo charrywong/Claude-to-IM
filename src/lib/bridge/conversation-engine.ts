@@ -56,6 +56,57 @@ export interface ConversationResult {
   sdkSessionId: string | null;
 }
 
+const TOOL_OUTPUT_LIMIT = 4000;
+
+function truncateToolOutput(text: string): string {
+  if (text.length <= TOOL_OUTPUT_LIMIT) return text;
+  return `${text.slice(0, TOOL_OUTPUT_LIMIT)}\n... [truncated ${text.length - TOOL_OUTPUT_LIMIT} chars]`;
+}
+
+function formatBlocksForDelivery(contentBlocks: MessageContentBlock[]): string {
+  const toolNames = new Map<string, string>();
+  const toolInputs = new Map<string, unknown>();
+  const parts: string[] = [];
+
+  for (const block of contentBlocks) {
+    if (block.type === 'text') {
+      const text = block.text.trim();
+      if (text) parts.push(text);
+      continue;
+    }
+
+    if (block.type === 'tool_use') {
+      toolNames.set(block.id, block.name);
+      toolInputs.set(block.id, block.input);
+      continue;
+    }
+
+    if (block.type !== 'tool_result') continue;
+
+    const toolName = toolNames.get(block.tool_use_id) || 'Tool';
+    const rawContent = typeof block.content === 'string'
+      ? block.content
+      : block.content != null
+        ? JSON.stringify(block.content, null, 2)
+        : '';
+    const output = truncateToolOutput(rawContent.trim());
+    if (!output) continue;
+
+    const label = block.is_error ? `${toolName} stderr` : `${toolName} output`;
+    const toolInput = toolInputs.get(block.tool_use_id);
+    let commandText = '';
+    if (toolName === 'Bash' && toolInput && typeof toolInput === 'object' && 'command' in toolInput) {
+      const command = (toolInput as { command?: unknown }).command;
+      if (typeof command === 'string' && command.trim()) {
+        commandText = `**${toolName} command:**\n\`\`\`bash\n${truncateToolOutput(command.trim())}\n\`\`\`\n\n`;
+      }
+    }
+    parts.push(`${commandText}**${label}:**\n\`\`\`\n${output}\n\`\`\``);
+  }
+
+  return parts.join('\n\n').trim();
+}
+
 /**
  * Process an inbound message: send to Claude, consume the response stream,
  * save to DB, and return the result.
@@ -100,6 +151,7 @@ export async function processMessage(
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
     let savedContent = text;
+    let persistedFiles = files;
     if (files && files.length > 0) {
       const workDir = binding.workingDirectory || session?.working_directory || '';
       if (workDir) {
@@ -115,13 +167,17 @@ export async function processMessage(
             fs.writeFileSync(filePath, buffer);
             return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
           });
+          persistedFiles = files.map((f, idx) => ({
+            ...f,
+            filePath: fileMeta[idx]?.filePath,
+          }));
           savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
         } catch (err) {
           console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
-          savedContent = `[${files.length} image(s) attached] ${text}`;
+          savedContent = `[${files.length} attachment(s) attached] ${text}`;
         }
       } else {
-        savedContent = `[${files.length} image(s) attached] ${text}`;
+        savedContent = `[${files.length} attachment(s) attached] ${text}`;
       }
     }
     store.addMessage(sessionId, 'user', savedContent);
@@ -175,7 +231,7 @@ export async function processMessage(
       permissionMode,
       provider: resolvedProvider,
       conversationHistory: historyMsgs,
-      files,
+      files: persistedFiles,
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
@@ -383,12 +439,8 @@ async function consumeStream(
       }
     }
 
-    // Extract text-only response for IM delivery
-    const responseText = contentBlocks
-      .filter((b): b is Extract<MessageContentBlock, { type: 'text' }> => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-      .trim();
+    // Build IM delivery text from text blocks plus key tool outputs.
+    const responseText = formatBlocksForDelivery(contentBlocks);
 
     return {
       responseText,
@@ -423,7 +475,7 @@ async function consumeStream(
       || e instanceof Error && e.name === 'AbortError';
 
     return {
-      responseText: '',
+      responseText: formatBlocksForDelivery(contentBlocks),
       tokenUsage,
       hasError: true,
       errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),

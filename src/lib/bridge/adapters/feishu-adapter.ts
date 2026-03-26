@@ -16,6 +16,7 @@
  */
 
 import crypto from 'crypto';
+import fs from 'fs';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type {
   ChannelType,
@@ -33,7 +34,7 @@ import {
   hasComplexMarkdown,
   buildCardContent,
   buildPostContent,
-  buildStreamingContent,
+  buildStreamingCardJson,
   buildFinalCardJson,
   buildPermissionButtonCard,
   formatElapsed,
@@ -48,7 +49,7 @@ const MAX_FILE_SIZE = 20 * 1024 * 1024;
 /** Feishu emoji type for typing indicator (same as Openclaw). */
 const TYPING_EMOJI = 'Typing';
 
-/** State for an active CardKit v2 streaming card. */
+/** State for an active CardKit v1 streaming card. */
 interface FeishuCardState {
   cardId: string;
   messageId: string;
@@ -99,6 +100,37 @@ const MIME_BY_TYPE: Record<string, string> = {
   video: 'video/mp4',
   media: 'application/octet-stream',
 };
+
+/** Outbound image file extensions supported by Feishu image upload. */
+const SUPPORTED_OUTBOUND_IMAGE_EXTS = new Set([
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.tiff', '.tif', '.bmp', '.ico',
+]);
+
+/** Feishu file upload type mapping by extension. Unknown types fall back to stream. */
+const FEISHU_FILE_TYPE_BY_EXT: Record<string, 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream'> = {
+  '.opus': 'opus',
+  '.ogg': 'opus',
+  '.mp4': 'mp4',
+  '.mov': 'mp4',
+  '.m4v': 'mp4',
+  '.pdf': 'pdf',
+  '.doc': 'doc',
+  '.docx': 'doc',
+  '.rtf': 'doc',
+  '.txt': 'doc',
+  '.md': 'doc',
+  '.xls': 'xls',
+  '.xlsx': 'xls',
+  '.csv': 'xls',
+  '.tsv': 'xls',
+  '.numbers': 'xls',
+  '.ppt': 'ppt',
+  '.pptx': 'ppt',
+  '.key': 'ppt',
+};
+
+/** Pseudo-tool tag emitted by the model when it intentionally wants the bridge to send a local file. */
+const SEND_FILE_TAG_RE = /<cti-send-file\s+path=(["'])(\/[^"']+)\1\s*\/>/g;
 
 export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
@@ -351,7 +383,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
-  // ── Streaming Card (CardKit v2) ────────────────────────────────
+  // ── Streaming Card (CardKit v1) ────────────────────────────────
 
   /**
    * Create a new streaming card and send it as a message.
@@ -374,7 +406,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!this.restClient) return false;
 
     try {
-      // Step 1: Create card via CardKit v2
+      // Step 1: Create card via CardKit v1
       const cardBody = {
         schema: '2.0',
         config: {
@@ -393,10 +425,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       };
 
-      const createResp = await (this.restClient as any).cardkit.v2.card.create({
+      const createResp = await (this.restClient as any).cardkit.v1.card.create({
         data: { type: 'card_json', data: JSON.stringify(cardBody) },
       });
-      const cardId = createResp?.data?.card_id;
+      const cardId = createResp?.data?.card_id || createResp?.data?.card?.card_id || createResp?.data?.id;
       if (!cardId) {
         console.warn('[feishu-adapter] Card create returned no card_id');
         return false;
@@ -488,20 +520,23 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return;
 
-    const content = buildStreamingContent(state.pendingText || '', state.toolCalls);
-
     state.sequence++;
-    const seq = state.sequence;
-    const cardId = state.cardId;
+    const cardJson = buildStreamingCardJson(state.pendingText || '', state.toolCalls);
 
-    // Fire-and-forget — streaming updates are non-critical
-    (this.restClient as any).cardkit.v2.card.streamContent({
-      path: { card_id: cardId },
-      data: { content, sequence: seq },
+    // Fire-and-forget: streaming updates are non-critical
+    (this.restClient as any).cardkit.v1.card.update({
+      path: { card_id: state.cardId },
+      data: {
+        card: {
+          type: 'card_json',
+          data: cardJson,
+        },
+        sequence: state.sequence,
+      },
     }).then(() => {
       state.lastUpdateAt = Date.now();
     }).catch((err: unknown) => {
-      console.warn('[feishu-adapter] streamContent failed:', err instanceof Error ? err.message : err);
+      console.warn('[feishu-adapter] Streaming card update failed:', err instanceof Error ? err.message : err);
     });
   }
 
@@ -540,14 +575,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     try {
-      // Step 1: Close streaming mode
-      state.sequence++;
-      await (this.restClient as any).cardkit.v2.card.settings.streamingMode.set({
-        path: { card_id: state.cardId },
-        data: { streaming_mode: false, sequence: state.sequence },
-      });
-
-      // Step 2: Build and apply final card
       const statusLabels: Record<string, string> = {
         completed: '✅ Completed',
         interrupted: '⚠️ Interrupted',
@@ -559,19 +586,55 @@ export class FeishuAdapter extends BaseChannelAdapter {
         elapsed: formatElapsed(elapsedMs),
       };
 
-      const finalCardJson = buildFinalCardJson(responseText, state.toolCalls, footer);
+      const { text: finalTextWithoutAssets, assetPaths } = this.extractOutboundSendDirectives(responseText);
+      const finalText = finalTextWithoutAssets.trim() || (assetPaths.length > 0 ? 'Attachment sent.' : '');
 
-      state.sequence++;
-      await (this.restClient as any).cardkit.v2.card.update({
-        path: { card_id: state.cardId },
-        data: { type: 'card_json', data: finalCardJson, sequence: state.sequence },
-      });
+      const finalCardJson = buildFinalCardJson(finalText, state.toolCalls, footer);
+      try {
+        state.sequence++;
+        await (this.restClient as any).cardkit.v1.card.settings({
+          path: { card_id: state.cardId },
+          data: {
+            settings: JSON.stringify({
+              config: {
+                streaming_mode: false,
+              },
+            }),
+            sequence: state.sequence,
+          },
+        });
+      } catch (err) {
+        console.warn('[feishu-adapter] Card settings update failed, continuing with final card:', err instanceof Error ? err.message : err);
+      }
 
-      console.log(`[feishu-adapter] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
-      return true;
-    } catch (err) {
-      console.warn('[feishu-adapter] Card finalize failed:', err instanceof Error ? err.message : err);
-      return false;
+      try {
+        state.sequence++;
+        await (this.restClient as any).cardkit.v1.card.update({
+          path: { card_id: state.cardId },
+          data: {
+            card: {
+              type: 'card_json',
+              data: finalCardJson,
+            },
+            sequence: state.sequence,
+          },
+        });
+
+        for (const assetPath of assetPaths) {
+          const assetResult = await this.sendLocalAsset(chatId, assetPath);
+          if (!assetResult.ok) {
+            console.warn('[feishu-adapter] Final attachment send failed:', assetResult.error);
+          } else {
+            console.log(`[feishu-adapter] Final attachment sent: ${assetPath}`);
+          }
+        }
+
+        console.log(`[feishu-adapter] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
+        return true;
+      } catch (err) {
+        console.warn('[feishu-adapter] Final card update failed, falling back to regular message:', err instanceof Error ? err.message : err);
+        return false;
+      }
     } finally {
       this.activeCards.delete(chatId);
     }
@@ -631,6 +694,24 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     let text = message.text;
+    const extracted = this.extractOutboundSendDirectives(text);
+    text = extracted.text;
+
+    let lastMessageId: string | undefined;
+
+    for (const assetPath of extracted.assetPaths) {
+      const assetResult = await this.sendLocalAsset(message.address.chatId, assetPath);
+      if (!assetResult.ok) {
+        return assetResult;
+      }
+      lastMessageId = assetResult.messageId || lastMessageId;
+    }
+
+    if (!text.trim()) {
+      return lastMessageId
+        ? { ok: true, messageId: lastMessageId }
+        : { ok: false, error: 'Empty message' };
+    }
 
     // Convert HTML to markdown for Feishu rendering (e.g. command responses)
     if (message.parseMode === 'HTML') {
@@ -654,6 +735,141 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return this.sendAsCard(message.address.chatId, text);
     }
     return this.sendAsPost(message.address.chatId, text);
+  }
+
+  private extractOutboundSendDirectives(text: string): { text: string; assetPaths: string[] } {
+    const assetPaths: string[] = [];
+    const seen = new Set<string>();
+    let cleaned = text;
+
+    const maybeAddPath = (candidate: string): boolean => {
+      const normalized = candidate.trim();
+      if (!normalized.startsWith('/')) return false;
+      try {
+        const stat = fs.statSync(normalized);
+        if (!stat.isFile() || stat.size <= 0 || stat.size > 100 * 1024 * 1024) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        assetPaths.push(normalized);
+      }
+      return true;
+    };
+
+    cleaned = cleaned.replace(SEND_FILE_TAG_RE, (match, _quote, assetPath) => {
+      return maybeAddPath(assetPath) ? '' : match;
+    });
+
+    cleaned = cleaned
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    return { text: cleaned, assetPaths };
+  }
+
+  private isOutboundImagePath(assetPath: string): boolean {
+    const lower = assetPath.toLowerCase();
+    const ext = lower.slice(lower.lastIndexOf('.'));
+    return SUPPORTED_OUTBOUND_IMAGE_EXTS.has(ext);
+  }
+
+  private async sendLocalAsset(chatId: string, assetPath: string): Promise<SendResult> {
+    if (this.isOutboundImagePath(assetPath)) {
+      return this.sendLocalImage(chatId, assetPath);
+    }
+    return this.sendLocalFile(chatId, assetPath);
+  }
+
+  private async sendLocalImage(chatId: string, imagePath: string): Promise<SendResult> {
+    if (!this.restClient) {
+      return { ok: false, error: 'Feishu client not initialized' };
+    }
+
+    try {
+      const image = fs.createReadStream(imagePath);
+      const uploadRes = await this.restClient.im.v1.image.create({
+        data: {
+          image_type: 'message',
+          image,
+        },
+      });
+      const imageKey = uploadRes?.image_key;
+      if (!imageKey) {
+        return { ok: false, error: `Image upload failed for ${imagePath}` };
+      }
+      console.log(`[feishu-adapter] Image uploaded: ${imagePath} -> ${imageKey}`);
+
+      const sendRes = await this.restClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          msg_type: 'image',
+          content: JSON.stringify({ image_key: imageKey }),
+        },
+      });
+
+      if (sendRes?.data?.message_id) {
+        console.log(`[feishu-adapter] Image message sent: ${imagePath} -> ${sendRes.data.message_id}`);
+        return { ok: true, messageId: sendRes.data.message_id };
+      }
+      return { ok: false, error: sendRes?.msg || `Image send failed for ${imagePath}` };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : `Image send failed for ${imagePath}`,
+      };
+    }
+  }
+
+  private async sendLocalFile(chatId: string, filePath: string): Promise<SendResult> {
+    if (!this.restClient) {
+      return { ok: false, error: 'Feishu client not initialized' };
+    }
+
+    try {
+      const lower = filePath.toLowerCase();
+      const ext = lower.includes('.') ? lower.slice(lower.lastIndexOf('.')) : '';
+      const fileType = FEISHU_FILE_TYPE_BY_EXT[ext] || 'stream';
+      const file = fs.createReadStream(filePath);
+      const fileName = filePath.slice(filePath.lastIndexOf('/') + 1) || 'attachment';
+
+      const uploadRes = await this.restClient.im.v1.file.create({
+        data: {
+          file_type: fileType,
+          file_name: fileName,
+          file,
+        },
+      });
+      const fileKey = uploadRes?.file_key;
+      if (!fileKey) {
+        return { ok: false, error: `File upload failed for ${filePath}` };
+      }
+      console.log(`[feishu-adapter] File uploaded: ${filePath} -> ${fileKey}`);
+
+      const sendRes = await this.restClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          msg_type: 'file',
+          content: JSON.stringify({ file_key: fileKey }),
+        },
+      });
+
+      if (sendRes?.data?.message_id) {
+        console.log(`[feishu-adapter] File message sent: ${filePath} -> ${sendRes.data.message_id}`);
+        return { ok: true, messageId: sendRes.data.message_id };
+      }
+      return { ok: false, error: sendRes?.msg || `File send failed for ${filePath}` };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : `File send failed for ${filePath}`,
+      };
+    }
   }
 
   /**
