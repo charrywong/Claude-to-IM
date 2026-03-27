@@ -225,6 +225,49 @@ export interface LLMProvider {
   streamChat(params: StreamChatParams): ReadableStream<string>;
 }
 
+// ── Host Interface: Scheduler ────────────────────────────────
+
+export interface ScheduledTaskRecord {
+  id: string;
+  channelType: string;
+  chatId: string;
+  kind: 'agent_once' | 'agent_daily';
+  createdAt: string;
+  nextRunAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface SchedulerGateway {
+  scheduleTaskAt(input: {
+    channelType: string;
+    chatId: string;
+    title: string;
+    description: string;
+    instruction: string;
+    runAt: string;
+    timezone?: string;
+  }): ScheduledTaskRecord;
+  scheduleTaskIn(input: {
+    channelType: string;
+    chatId: string;
+    title?: string;
+    description?: string;
+    instruction: string;
+    delayMs: number;
+  }): ScheduledTaskRecord;
+  scheduleTaskDaily(input: {
+    channelType: string;
+    chatId: string;
+    title: string;
+    description: string;
+    instruction: string;
+    timeHHMM: string;
+    timezone?: string;
+  }): ScheduledTaskRecord;
+  listTasks(channelType: string, chatId: string): ScheduledTaskRecord[];
+  removeTask(id: string, channelType: string, chatId: string): boolean;
+}
+
 // ── Host Interface: Permission Gateway ───────────────────────
 
 /** Resolution result for a pending permission. */

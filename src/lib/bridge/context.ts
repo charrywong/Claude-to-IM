@@ -13,6 +13,7 @@ import type {
   LLMProvider,
   PermissionGateway,
   LifecycleHooks,
+  SchedulerGateway,
 } from './host.js';
 
 export interface BridgeContext {
@@ -20,6 +21,7 @@ export interface BridgeContext {
   llm: LLMProvider;
   permissions: PermissionGateway;
   lifecycle: LifecycleHooks;
+  scheduler?: SchedulerGateway;
 }
 
 const CONTEXT_KEY = '__bridge_context__';

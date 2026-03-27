@@ -193,6 +193,163 @@ function getState(): BridgeManagerState {
   return g[GLOBAL_KEY];
 }
 
+function parseDelayMs(raw: string): number | null {
+  const match = raw.trim().match(/^(\d+)\s*([smhd])$/i);
+  if (!match) return null;
+  const value = parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+  if (!Number.isFinite(value) || value <= 0) return null;
+  switch (unit) {
+    case 's': return value * 1000;
+    case 'm': return value * 60_000;
+    case 'h': return value * 3_600_000;
+    case 'd': return value * 86_400_000;
+    default: return null;
+  }
+}
+
+const CTI_SCHEDULE_TAG_RE = /<cti-schedule>\s*([\s\S]*?)\s*<\/cti-schedule>/gi;
+
+type ParsedScheduleDirective = {
+  title: string;
+  description: string;
+  instruction: string;
+  timezone?: string;
+} & (
+  | { schedule: { mode: 'once'; run_at: string } }
+  | { schedule: { mode: 'daily'; time: string } }
+);
+
+function parseScheduleDirectives(responseText: string): {
+  cleanedText: string;
+  directives: ParsedScheduleDirective[];
+  errors: string[];
+} {
+  const directives: ParsedScheduleDirective[] = [];
+  const errors: string[] = [];
+
+  const cleanedText = responseText.replace(CTI_SCHEDULE_TAG_RE, (_full, body: string) => {
+    const raw = String(body || '').trim();
+    if (!raw) {
+      errors.push('Empty <cti-schedule> block.');
+      return '';
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const title = String(parsed.title || '').trim();
+      const description = String(parsed.description || '').trim();
+      const instruction = String(parsed.instruction || '').trim();
+      const timezone = typeof parsed.timezone === 'string' ? parsed.timezone.trim() : undefined;
+      const schedule = parsed.schedule;
+
+      if (!title || !description || !instruction || !schedule || typeof schedule !== 'object') {
+        throw new Error('Missing required fields.');
+      }
+
+      const mode = String((schedule as Record<string, unknown>).mode || '').trim();
+      if (mode === 'once') {
+        const runAt = String((schedule as Record<string, unknown>).run_at || '').trim();
+        if (!runAt || !Number.isFinite(new Date(runAt).getTime())) {
+          throw new Error('Invalid schedule.run_at.');
+        }
+        directives.push({
+          title,
+          description,
+          instruction,
+          timezone,
+          schedule: { mode: 'once', run_at: runAt },
+        });
+      } else if (mode === 'daily') {
+        const time = String((schedule as Record<string, unknown>).time || '').trim();
+        if (!/^\d{2}:\d{2}$/.test(time)) {
+          throw new Error('Invalid schedule.time.');
+        }
+        directives.push({
+          title,
+          description,
+          instruction,
+          timezone,
+          schedule: { mode: 'daily', time },
+        });
+      } else {
+        throw new Error(`Unsupported schedule mode: ${mode || '(empty)'}`);
+      }
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : 'Invalid schedule directive.');
+    }
+
+    return '';
+  });
+
+  return {
+    cleanedText: cleanedText.replace(/\n{3,}/g, '\n\n').trim(),
+    directives,
+    errors,
+  };
+}
+
+function appendScheduleErrors(text: string, errors: string[]): string {
+  if (errors.length === 0) return text;
+  const suffix = [
+    '**Schedule parsing failed:**',
+    ...errors.map((err) => `- ${err}`),
+  ].join('\n');
+  return text.trim() ? `${text.trim()}\n\n${suffix}` : suffix;
+}
+
+function materializeScheduleDirectives(
+  channelType: string,
+  chatId: string,
+  directives: ParsedScheduleDirective[],
+): string[] {
+  const { scheduler } = getBridgeContext();
+  if (!scheduler || directives.length === 0) return [];
+
+  const created: string[] = [];
+  for (const directive of directives) {
+    if (directive.schedule.mode === 'once') {
+      const task = scheduler.scheduleTaskAt({
+        channelType,
+        chatId,
+        title: directive.title,
+        description: directive.description,
+        instruction: directive.instruction,
+        runAt: directive.schedule.run_at,
+        timezone: directive.timezone,
+      });
+      created.push(`Task created: ${task.id} (${directive.title})`);
+      continue;
+    }
+
+    const task = scheduler.scheduleTaskDaily({
+      channelType,
+      chatId,
+      title: directive.title,
+      description: directive.description,
+      instruction: directive.instruction,
+      timeHHMM: directive.schedule.time,
+      timezone: directive.timezone,
+    });
+    created.push(`Daily task created: ${task.id} (${directive.title})`);
+  }
+
+  return created;
+}
+
+async function sendProactiveMessage(
+  address: ChannelAddress,
+  text: string,
+  parseMode: OutboundMessage['parseMode'] = 'plain',
+): Promise<SendResult> {
+  const state = getState();
+  const adapter = state.adapters.get(address.channelType);
+  if (!adapter || !adapter.isRunning()) {
+    return { ok: false, error: `Adapter not running for channel ${address.channelType}` };
+  }
+  return deliver(adapter, { address, text, parseMode });
+}
+
 /**
  * Process a function with per-session serialization.
  * Different sessions run concurrently; same-session requests are serialized.
@@ -716,6 +873,17 @@ async function handleMessage(
       );
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent);
 
+    const parsedSchedules = parseScheduleDirectives(result.responseText);
+    const createdTasks = materializeScheduleDirectives(
+      adapter.channelType,
+      msg.address.chatId,
+      parsedSchedules.directives,
+    );
+    let responseText = appendScheduleErrors(parsedSchedules.cleanedText, parsedSchedules.errors);
+    if (!responseText && createdTasks.length > 0) {
+      responseText = createdTasks.join('\n');
+    }
+
     // Finalize streaming card if adapter supports it.
     // onStreamEnd awaits any in-flight card creation and returns true if a card
     // was actually finalized (meaning content is already visible to the user).
@@ -723,7 +891,7 @@ async function handleMessage(
     if (hasStreamingCards && adapter.onStreamEnd) {
       try {
         const status = result.hasError ? 'error' : 'completed';
-        cardFinalized = await adapter.onStreamEnd(msg.address.chatId, status, result.responseText);
+        cardFinalized = await adapter.onStreamEnd(msg.address.chatId, status, responseText);
       } catch (err) {
         console.warn('[bridge-manager] Card finalize failed:', err instanceof Error ? err.message : err);
       }
@@ -731,9 +899,9 @@ async function handleMessage(
 
     // Send response text — render via channel-appropriate format.
     // Skip if streaming card was finalized (content already in card).
-    if (result.responseText) {
+    if (responseText) {
       if (!cardFinalized) {
-        await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
+        await deliverResponse(adapter, msg.address, responseText, binding.codepilotSessionId, msg.messageId);
       }
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
@@ -743,6 +911,10 @@ async function handleMessage(
         replyToMessageId: msg.messageId,
       };
       await deliver(adapter, errorResponse);
+    }
+
+    if (createdTasks.length > 0) {
+      console.log(`[bridge-manager] Created scheduled tasks for ${adapter.channelType}:${msg.address.chatId}: ${createdTasks.join(', ')}`);
     }
 
     // Persist the actual SDK session ID for future resume.
@@ -789,7 +961,7 @@ async function handleCommand(
   msg: InboundMessage,
   text: string,
 ): Promise<void> {
-  const { store } = getBridgeContext();
+  const { store, scheduler } = getBridgeContext();
 
   // Extract command and args (handle /command@botname format)
   const parts = text.split(/\s+/);
@@ -833,6 +1005,10 @@ async function handleCommand(
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
+        '/task in <2m|30s|1h> <instruction> - Schedule one agent task',
+        '/task daily <HH:MM> <instruction> - Daily recurring agent task',
+        '/task list - List scheduled tasks',
+        '/task remove <id> - Remove scheduled task',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
         '/help - Show this help',
       ].join('\n');
@@ -969,6 +1145,97 @@ async function handleCommand(
       break;
     }
 
+    case '/task': {
+      if (!scheduler) {
+        response = 'Scheduler is not available in this runtime.';
+        break;
+      }
+      const taskParts = args.split(/\s+/).filter(Boolean);
+      const subcommand = (taskParts[0] || '').toLowerCase();
+
+      if (subcommand === 'list') {
+        const tasks = scheduler.listTasks(adapter.channelType, msg.address.chatId);
+        if (tasks.length === 0) {
+          response = 'No scheduled tasks.';
+          break;
+        }
+        response = [
+          '<b>Scheduled Tasks</b>',
+          '',
+          ...tasks.slice(0, 20).map((task) => {
+            const title = escapeHtml(String(task.payload.title || task.payload.instruction || ''));
+            const description = escapeHtml(String(task.payload.description || ''));
+            return `<code>${task.id}</code> ${title}${description ? `\n${description}` : ''}\nnext: <code>${escapeHtml(task.nextRunAt)}</code>`;
+          }),
+        ].join('\n');
+        break;
+      }
+
+      if (subcommand === 'remove') {
+        const taskId = taskParts[1];
+        if (!taskId) {
+          response = 'Usage: /task remove &lt;id&gt;';
+          break;
+        }
+        response = scheduler.removeTask(taskId, adapter.channelType, msg.address.chatId)
+          ? `Removed task <code>${escapeHtml(taskId)}</code>.`
+          : 'Task not found.';
+        break;
+      }
+
+      if (subcommand === 'in') {
+        const delayRaw = taskParts[1] || '';
+        const instruction = taskParts.slice(2).join(' ').trim();
+        if (!delayRaw || !instruction) {
+          response = 'Usage: /task in &lt;2m|30s|1h&gt; &lt;instruction&gt;';
+          break;
+        }
+        const delayMs = parseDelayMs(delayRaw);
+        if (!delayMs) {
+          response = 'Invalid delay. Use forms like 30s, 2m, 1h, 1d.';
+          break;
+        }
+        const task = scheduler.scheduleTaskIn({
+          channelType: adapter.channelType,
+          chatId: msg.address.chatId,
+          title: instruction,
+          description: instruction,
+          instruction,
+          delayMs,
+        });
+        response = `Task created.\nTask: <code>${task.id}</code>\nInstruction: <b>${escapeHtml(instruction)}</b>\nNext run: <code>${escapeHtml(task.nextRunAt)}</code>`;
+        break;
+      }
+
+      if (subcommand === 'daily') {
+        const timeHHMM = taskParts[1] || '';
+        const instruction = taskParts.slice(2).join(' ').trim();
+        if (!/^\d{2}:\d{2}$/.test(timeHHMM) || !instruction) {
+          response = 'Usage: /task daily &lt;HH:MM&gt; &lt;instruction&gt;';
+          break;
+        }
+        const task = scheduler.scheduleTaskDaily({
+          channelType: adapter.channelType,
+          chatId: msg.address.chatId,
+          title: instruction,
+          description: instruction,
+          instruction,
+          timeHHMM,
+        });
+        response = `Daily task created.\nTask: <code>${task.id}</code>\nInstruction: <b>${escapeHtml(instruction)}</b>\nNext run: <code>${escapeHtml(task.nextRunAt)}</code>`;
+        break;
+      }
+
+      response = [
+        'Usage:',
+        '/task in <2m|30s|1h> <instruction>',
+        '/task daily <HH:MM> <instruction>',
+        '/task list',
+        '/task remove <id>',
+      ].join('\n');
+      break;
+    }
+
     case '/help':
       response = [
         '<b>CodePilot Bridge Commands</b>',
@@ -980,6 +1247,10 @@ async function handleCommand(
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
+        '/task in <2m|30s|1h> <instruction> - Schedule one agent task',
+        '/task daily <HH:MM> <instruction> - Daily recurring agent task',
+        '/task list - List scheduled tasks',
+        '/task remove <id> - Remove scheduled task',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
         '1/2/3 - Quick permission reply (Feishu/QQ/WeChat, single pending)',
         '/help - Show this help',
@@ -1028,4 +1299,6 @@ export function computeSdkSessionUpdate(
 // Exposed so integration tests can exercise handleMessage directly
 // without wiring up the full adapter loop.
 /** @internal */
-export const _testOnly = { handleMessage };
+export const _testOnly = { handleMessage, sendProactiveMessage };
+
+export { sendProactiveMessage };
