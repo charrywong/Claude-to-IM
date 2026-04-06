@@ -11,7 +11,11 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { initBridgeContext } from '../../lib/bridge/context';
+import { handleCommand } from '../../lib/bridge/bridge-manager';
+import { BaseChannelAdapter } from '../../lib/bridge/channel-adapter';
 import type { BridgeStore, LifecycleHooks } from '../../lib/bridge/host';
+import type { BridgeSession, ModelCatalog } from '../../lib/bridge/host';
+import type { ChannelBinding, InboundMessage, OutboundMessage, SendResult } from '../../lib/bridge/types';
 
 // ── Test the session lock mechanism directly ────────────────
 // We test the processWithSessionLock pattern by extracting its logic.
@@ -167,3 +171,246 @@ function createMinimalStore(settings: Record<string, string> = {}): BridgeStore 
     setChannelOffset: () => {},
   };
 }
+
+class TestAdapter extends BaseChannelAdapter {
+  readonly channelType = 'telegram';
+  sent: OutboundMessage[] = [];
+
+  async start() {}
+  async stop() {}
+  isRunning() { return true; }
+  async consumeOne() { return null; }
+  async send(message: OutboundMessage): Promise<SendResult> {
+    this.sent.push(message);
+    return { ok: true, messageId: String(this.sent.length) };
+  }
+  validateConfig() { return null; }
+  isAuthorized() { return true; }
+}
+
+class CommandTestStore implements BridgeStore {
+  private settings = new Map<string, string>();
+  private sessions = new Map<string, BridgeSession>();
+  private bindings = new Map<string, ChannelBinding>();
+
+  constructor(defaultModel = 'claude-default') {
+    this.settings.set('bridge_default_model', defaultModel);
+    this.settings.set('default_model', defaultModel);
+  }
+
+  seedSession(session: BridgeSession) {
+    this.sessions.set(session.id, session);
+  }
+
+  seedBinding(binding: ChannelBinding) {
+    this.bindings.set(`${binding.channelType}:${binding.chatId}`, binding);
+  }
+
+  getSetting(key: string) { return this.settings.get(key) ?? null; }
+  getChannelBinding(channelType: string, chatId: string) { return this.bindings.get(`${channelType}:${chatId}`) ?? null; }
+  upsertChannelBinding(data: { channelType: string; chatId: string; codepilotSessionId: string; sdkSessionId?: string; workingDirectory: string; model: string; mode?: string }) {
+    const key = `${data.channelType}:${data.chatId}`;
+    const existing = this.bindings.get(key);
+    const binding: ChannelBinding = {
+      id: existing?.id || `binding-${this.bindings.size + 1}`,
+      channelType: data.channelType,
+      chatId: data.chatId,
+      codepilotSessionId: data.codepilotSessionId,
+      sdkSessionId: data.sdkSessionId ?? existing?.sdkSessionId ?? '',
+      workingDirectory: data.workingDirectory,
+      model: data.model,
+      mode: (data.mode as ChannelBinding['mode']) ?? existing?.mode ?? 'code',
+      active: true,
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.bindings.set(key, binding);
+    return binding;
+  }
+  updateChannelBinding(id: string, updates: Partial<ChannelBinding>) {
+    for (const [key, binding] of this.bindings) {
+      if (binding.id === id) {
+        this.bindings.set(key, { ...binding, ...updates, updatedAt: new Date().toISOString() });
+      }
+    }
+  }
+  listChannelBindings() { return Array.from(this.bindings.values()); }
+  getSession(id: string) { return this.sessions.get(id) ?? null; }
+  createSession(_name: string, model: string, systemPrompt?: string, cwd?: string) {
+    const session: BridgeSession = {
+      id: `session-${this.sessions.size + 1}`,
+      working_directory: cwd || '/tmp',
+      model,
+      system_prompt: systemPrompt,
+    };
+    this.sessions.set(session.id, session);
+    return session;
+  }
+  updateSessionProviderId(sessionId: string, providerId: string) {
+    const session = this.sessions.get(sessionId);
+    if (session) session.provider_id = providerId;
+  }
+  addMessage() {}
+  getMessages() { return { messages: [] }; }
+  acquireSessionLock() { return true; }
+  renewSessionLock() {}
+  releaseSessionLock() {}
+  setSessionRuntimeStatus() {}
+  updateSdkSessionId() {}
+  updateSessionModel(sessionId: string, model: string) {
+    const session = this.sessions.get(sessionId);
+    if (session) session.model = model;
+  }
+  syncSdkTasks() {}
+  getProvider() { return undefined; }
+  getDefaultProviderId() { return null; }
+  insertAuditLog() {}
+  checkDedup() { return false; }
+  insertDedup() {}
+  cleanupExpiredDedup() {}
+  insertOutboundRef() {}
+  insertPermissionLink() {}
+  getPermissionLink() { return null; }
+  markPermissionLinkResolved() { return false; }
+  listPendingPermissionLinksByChat() { return []; }
+  getChannelOffset() { return '0'; }
+  setChannelOffset() {}
+}
+
+function createCommandMessage(text: string): InboundMessage {
+  return {
+    messageId: 'msg-1',
+    address: { channelType: 'telegram', chatId: 'chat-1', displayName: 'Test Chat' },
+    text,
+    timestamp: Date.now(),
+  };
+}
+
+describe('bridge-manager model commands', () => {
+  beforeEach(() => {
+    delete (globalThis as Record<string, unknown>)['__bridge_context__'];
+  });
+
+  it('lists current/default/catalog models via /model list', async () => {
+    const store = new CommandTestStore('claude-default');
+    store.seedSession({
+      id: 'session-1',
+      working_directory: '/tmp/project',
+      model: 'claude-session',
+      provider_id: 'provider-1',
+    });
+    store.seedBinding({
+      id: 'binding-1',
+      channelType: 'telegram',
+      chatId: 'chat-1',
+      codepilotSessionId: 'session-1',
+      sdkSessionId: '',
+      workingDirectory: '/tmp/project',
+      model: 'claude-current',
+      mode: 'code',
+      active: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>(),
+        listModels: async (): Promise<ModelCatalog> => ({
+          models: [{ id: 'claude-current' }, { id: 'claude-opus-4' }],
+          note: 'catalog note',
+        }),
+      },
+      permissions: { resolvePendingPermission: () => true },
+      lifecycle: {},
+    });
+
+    const adapter = new TestAdapter();
+    await handleCommand(adapter, createCommandMessage('/model list'), '/model list');
+
+    assert.equal(adapter.sent.length, 1);
+    assert.match(adapter.sent[0].text, /Model List/);
+    assert.match(adapter.sent[0].text, /claude-current/);
+    assert.match(adapter.sent[0].text, /claude-default/);
+    assert.match(adapter.sent[0].text, /claude-opus-4/);
+    assert.match(adapter.sent[0].text, /catalog note/);
+  });
+
+  it('switches to a fresh session on /model use', async () => {
+    const store = new CommandTestStore('claude-default');
+    store.seedSession({
+      id: 'session-1',
+      working_directory: '/tmp/project',
+      model: 'claude-session',
+      provider_id: 'provider-1',
+    });
+    store.seedBinding({
+      id: 'binding-1',
+      channelType: 'telegram',
+      chatId: 'chat-1',
+      codepilotSessionId: 'session-1',
+      sdkSessionId: 'sdk-1',
+      workingDirectory: '/tmp/project',
+      model: '',
+      mode: 'code',
+      active: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream<string>() },
+      permissions: { resolvePendingPermission: () => true },
+      lifecycle: {},
+    });
+
+    const adapter = new TestAdapter();
+    await handleCommand(adapter, createCommandMessage('/model use claude-sonnet-4'), '/model use claude-sonnet-4');
+
+    const binding = store.getChannelBinding('telegram', 'chat-1');
+    assert.ok(binding);
+    assert.notEqual(binding?.codepilotSessionId, 'session-1');
+    assert.equal(binding?.model, 'claude-sonnet-4');
+    assert.equal(binding?.sdkSessionId, '');
+    assert.equal(store.getSession(binding!.codepilotSessionId)?.model, 'claude-sonnet-4');
+    assert.equal(store.getSession(binding!.codepilotSessionId)?.provider_id, 'provider-1');
+    assert.match(adapter.sent[0].text, /fresh session was created/i);
+  });
+
+  it('restores default model on /model default', async () => {
+    const store = new CommandTestStore('claude-default');
+    store.seedSession({
+      id: 'session-1',
+      working_directory: '/tmp/project',
+      model: 'claude-session',
+    });
+    store.seedBinding({
+      id: 'binding-1',
+      channelType: 'telegram',
+      chatId: 'chat-1',
+      codepilotSessionId: 'session-1',
+      sdkSessionId: 'sdk-1',
+      workingDirectory: '/tmp/project',
+      model: 'claude-sonnet-4',
+      mode: 'code',
+      active: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream<string>() },
+      permissions: { resolvePendingPermission: () => true },
+      lifecycle: {},
+    });
+
+    const adapter = new TestAdapter();
+    await handleCommand(adapter, createCommandMessage('/model default'), '/model default');
+
+    const binding = store.getChannelBinding('telegram', 'chat-1');
+    assert.ok(binding);
+    assert.equal(binding?.model, '');
+    assert.equal(store.getSession(binding!.codepilotSessionId)?.model, 'claude-default');
+    assert.match(adapter.sent[0].text, /Model reset to default/);
+  });
+});

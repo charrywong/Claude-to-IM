@@ -27,6 +27,7 @@ import {
   sanitizeInput,
   validateMode,
 } from './security/validators.js';
+import type { BridgeSession, ModelCatalogEntry } from './host.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
 
@@ -206,6 +207,158 @@ function parseDelayMs(raw: string): number | null {
     case 'd': return value * 86_400_000;
     default: return null;
   }
+}
+
+function getDefaultModelSetting(): string {
+  const { store } = getBridgeContext();
+  return store.getSetting('bridge_default_model')
+    || store.getSetting('default_model')
+    || '';
+}
+
+function getModelState(binding: import('./types.js').ChannelBinding): {
+  currentModel: string;
+  bindingModel: string;
+  sessionModel: string;
+  defaultModel: string;
+  session: BridgeSession | null;
+} {
+  const { store } = getBridgeContext();
+  const session = store.getSession(binding.codepilotSessionId);
+  const bindingModel = binding.model.trim();
+  const sessionModel = session?.model?.trim() || '';
+  const defaultModel = getDefaultModelSetting();
+  const currentModel = bindingModel || sessionModel || defaultModel || '';
+
+  return {
+    currentModel,
+    bindingModel,
+    sessionModel,
+    defaultModel,
+    session,
+  };
+}
+
+function dedupeModelEntries(entries: ModelCatalogEntry[]): ModelCatalogEntry[] {
+  const seen = new Set<string>();
+  const unique: ModelCatalogEntry[] = [];
+
+  for (const entry of entries) {
+    const id = entry.id.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    unique.push({ ...entry, id });
+  }
+
+  return unique;
+}
+
+async function buildModelListResponse(binding: import('./types.js').ChannelBinding): Promise<string> {
+  const { llm } = getBridgeContext();
+  const state = getModelState(binding);
+  let catalogEntries: ModelCatalogEntry[] = [];
+  let catalogNote = '';
+
+  if (llm.listModels) {
+    try {
+      const catalog = await llm.listModels();
+      catalogEntries = catalog.models ?? [];
+      catalogNote = catalog.note ?? '';
+    } catch (error) {
+      catalogNote = error instanceof Error
+        ? `Model catalog lookup failed: ${escapeHtml(error.message)}`
+        : 'Model catalog lookup failed.';
+    }
+  } else {
+    catalogNote = 'This runtime does not expose a model catalog yet.';
+  }
+
+  const modelEntries = dedupeModelEntries([
+    ...(state.currentModel ? [{ id: state.currentModel, label: 'current' }] : []),
+    ...(state.defaultModel ? [{ id: state.defaultModel, label: 'default' }] : []),
+    ...catalogEntries,
+  ]);
+
+  const lines = [
+    '<b>Model List</b>',
+    '',
+    `Current: <code>${escapeHtml(state.currentModel || 'runtime default')}</code>`,
+    `Default: <code>${escapeHtml(state.defaultModel || 'runtime default')}</code>`,
+  ];
+
+  if (modelEntries.length > 0) {
+    lines.push('', '<b>Known Models</b>');
+    for (const entry of modelEntries) {
+      const label = entry.label ? ` <i>(${escapeHtml(entry.label)})</i>` : '';
+      lines.push(`- <code>${escapeHtml(entry.id)}</code>${label}`);
+    }
+  } else {
+    lines.push('', 'No model identifiers are currently available.');
+  }
+
+  if (catalogNote) {
+    lines.push('', `<i>${escapeHtml(catalogNote)}</i>`);
+  }
+
+  return lines.join('\n');
+}
+
+function abortActiveTask(sessionId: string): void {
+  const state = getState();
+  const taskAbort = state.activeTasks.get(sessionId);
+  if (!taskAbort) return;
+  taskAbort.abort();
+  state.activeTasks.delete(sessionId);
+}
+
+function switchBindingToModel(
+  address: import('./types.js').ChannelAddress,
+  binding: import('./types.js').ChannelBinding,
+  overrideModel: string,
+): import('./types.js').ChannelBinding {
+  const { store } = getBridgeContext();
+  const current = getModelState(binding);
+  const displayName = address.displayName || address.chatId;
+  const nextSession = store.createSession(
+    `Bridge: ${displayName}`,
+    overrideModel || current.defaultModel,
+    current.session?.system_prompt,
+    binding.workingDirectory,
+    binding.mode,
+  );
+
+  if (current.session?.provider_id) {
+    store.updateSessionProviderId(nextSession.id, current.session.provider_id);
+  }
+
+  store.updateChannelBinding(binding.id, {
+    codepilotSessionId: nextSession.id,
+    sdkSessionId: '',
+    workingDirectory: binding.workingDirectory,
+    model: overrideModel,
+    mode: binding.mode,
+    active: true,
+  });
+
+  return store.getChannelBinding(address.channelType, address.chatId) ?? binding;
+}
+
+function buildModelStatusResponse(binding: import('./types.js').ChannelBinding): string {
+  const state = getModelState(binding);
+  return [
+    '<b>Model Status</b>',
+    '',
+    `Session: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
+    `Current: <code>${escapeHtml(state.currentModel || 'runtime default')}</code>`,
+    `Override: <code>${escapeHtml(state.bindingModel || 'none')}</code>`,
+    `Default: <code>${escapeHtml(state.defaultModel || 'runtime default')}</code>`,
+    '',
+    'Usage:',
+    '/model list',
+    '/model use <name>',
+    '/model default',
+    '/model help',
+  ].join('\n');
 }
 
 const CTI_SCHEDULE_TAG_RE = /<cti-schedule>\s*([\s\S]*?)\s*<\/cti-schedule>/gi;
@@ -956,7 +1109,7 @@ async function handleMessage(
 /**
  * Handle IM slash commands.
  */
-async function handleCommand(
+export async function handleCommand(
   adapter: BaseChannelAdapter,
   msg: InboundMessage,
   text: string,
@@ -1001,6 +1154,10 @@ async function handleCommand(
         '/new [path] - Start new session',
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
+        '/model - Show current model status',
+        '/model list - Show known models',
+        '/model use &lt;name&gt; - Switch model',
+        '/model default - Use the default model',
         '/mode plan|code|ask - Change mode',
         '/status - Show current status',
         '/sessions - List recent sessions',
@@ -1083,15 +1240,77 @@ async function handleCommand(
       break;
     }
 
+    case '/model': {
+      const binding = router.resolve(msg.address);
+      const [subcommand = '', ...rest] = args.split(/\s+/).filter(Boolean);
+      const normalizedSubcommand = subcommand.toLowerCase();
+
+      if (!normalizedSubcommand) {
+        response = buildModelStatusResponse(binding);
+        break;
+      }
+
+      if (normalizedSubcommand === 'help') {
+        response = [
+          '<b>Model Commands</b>',
+          '',
+          '/model',
+          '/model list',
+          '/model use &lt;name&gt;',
+          '/model default',
+          '/model help',
+        ].join('\n');
+        break;
+      }
+
+      if (normalizedSubcommand === 'list') {
+        response = await buildModelListResponse(binding);
+        break;
+      }
+
+      if (normalizedSubcommand === 'default') {
+        abortActiveTask(binding.codepilotSessionId);
+        const nextBinding = switchBindingToModel(msg.address, binding, '');
+        const nextState = getModelState(nextBinding);
+        response = [
+          'Model reset to default.',
+          `Session: <code>${nextBinding.codepilotSessionId.slice(0, 8)}...</code>`,
+          `Current: <code>${escapeHtml(nextState.currentModel || 'runtime default')}</code>`,
+        ].join('\n');
+        break;
+      }
+
+      if (normalizedSubcommand === 'use') {
+        const requestedModel = rest.join(' ').trim();
+        if (!requestedModel) {
+          response = 'Usage: /model use &lt;name&gt;';
+          break;
+        }
+        abortActiveTask(binding.codepilotSessionId);
+        const nextBinding = switchBindingToModel(msg.address, binding, requestedModel);
+        response = [
+          `Model switched to <code>${escapeHtml(requestedModel)}</code>.`,
+          `Session: <code>${nextBinding.codepilotSessionId.slice(0, 8)}...</code>`,
+          'A fresh session was created for this chat to avoid stale resume state.',
+        ].join('\n');
+        break;
+      }
+
+      response = 'Usage: /model | /model list | /model use &lt;name&gt; | /model default | /model help';
+      break;
+    }
+
     case '/status': {
       const binding = router.resolve(msg.address);
+      const modelState = getModelState(binding);
       response = [
         '<b>Bridge Status</b>',
         '',
         `Session: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
         `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
         `Mode: <b>${binding.mode}</b>`,
-        `Model: <code>${binding.model || 'default'}</code>`,
+        `Model: <code>${escapeHtml(modelState.currentModel || 'runtime default')}</code>`,
+        `Model Override: <code>${escapeHtml(modelState.bindingModel || 'none')}</code>`,
       ].join('\n');
       break;
     }
@@ -1243,6 +1462,10 @@ async function handleCommand(
         '/new [path] - Start new session',
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
+        '/model - Show current model status',
+        '/model list - Show known models',
+        '/model use &lt;name&gt; - Switch model',
+        '/model default - Use the default model',
         '/mode plan|code|ask - Change mode',
         '/status - Show current status',
         '/sessions - List recent sessions',

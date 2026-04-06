@@ -217,12 +217,28 @@ export interface StreamChatParams {
   onRuntimeStatusChange?: (status: string) => void;
 }
 
+export interface ModelCatalogEntry {
+  id: string;
+  label?: string;
+}
+
+export interface ModelCatalog {
+  models: ModelCatalogEntry[];
+  note?: string;
+}
+
 export interface LLMProvider {
   /**
    * Start a streaming chat with the LLM.
    * Returns a ReadableStream of SSE-formatted strings.
    */
   streamChat(params: StreamChatParams): ReadableStream<string>;
+  /**
+   * Optionally expose a runtime-specific model catalog for read-only display.
+   * Providers may return an empty list with a note when dynamic enumeration is
+   * unavailable in the current runtime.
+   */
+  listModels?(): Promise<ModelCatalog>;
 }
 
 // ── Host Interface: Scheduler ────────────────────────────────
