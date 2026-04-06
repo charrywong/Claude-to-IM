@@ -10,6 +10,9 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { initBridgeContext } from '../../lib/bridge/context';
 import { handleCommand } from '../../lib/bridge/bridge-manager';
 import { BaseChannelAdapter } from '../../lib/bridge/channel-adapter';
@@ -412,5 +415,56 @@ describe('bridge-manager model commands', () => {
     assert.equal(binding?.model, '');
     assert.equal(store.getSession(binding!.codepilotSessionId)?.model, 'claude-default');
     assert.match(adapter.sent[0].text, /Model reset to default/);
+  });
+
+  it('writes a safe restart request on /restart', async () => {
+    const store = new CommandTestStore('claude-default');
+    store.seedSession({
+      id: 'session-1',
+      working_directory: '/tmp/project',
+      model: 'claude-session',
+    });
+    store.seedBinding({
+      id: 'binding-1',
+      channelType: 'telegram',
+      chatId: 'chat-1',
+      codepilotSessionId: 'session-1',
+      sdkSessionId: 'sdk-1',
+      workingDirectory: '/tmp/project',
+      model: '',
+      mode: 'code',
+      active: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream<string>() },
+      permissions: { resolvePendingPermission: () => true },
+      lifecycle: {},
+    });
+
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cti-home-'));
+    const oldCtiHome = process.env.CTI_HOME;
+    process.env.CTI_HOME = tmpHome;
+
+    try {
+      const adapter = new TestAdapter();
+      await handleCommand(adapter, createCommandMessage('/restart'), '/restart');
+
+      const requestPath = path.join(tmpHome, 'runtime', 'restart-request.json');
+      const request = JSON.parse(fs.readFileSync(requestPath, 'utf8')) as {
+        requestedBy: string;
+        delayMs: number;
+      };
+
+      assert.equal(request.requestedBy, 'bridge-command');
+      assert.equal(request.delayMs, 15000);
+      assert.match(adapter.sent[0].text, /Safe restart requested/);
+    } finally {
+      if (oldCtiHome === undefined) delete process.env.CTI_HOME;
+      else process.env.CTI_HOME = oldCtiHome;
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
   });
 });

@@ -7,6 +7,8 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, ToolCallInfo } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
@@ -359,6 +361,22 @@ function buildModelStatusResponse(binding: import('./types.js').ChannelBinding):
     '/model default',
     '/model help',
   ].join('\n');
+}
+
+function getBridgeHome(): string {
+  return process.env.CTI_HOME || path.join(process.env.HOME || '~', '.claude-to-im');
+}
+
+function requestSafeRestart(requestedBy = 'bridge-command'): string {
+  const runtimeDir = path.join(getBridgeHome(), 'runtime');
+  const requestPath = path.join(runtimeDir, 'restart-request.json');
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(requestPath, JSON.stringify({
+    requestedAt: new Date().toISOString(),
+    requestedBy,
+    delayMs: 15_000,
+  }));
+  return requestPath;
 }
 
 const CTI_SCHEDULE_TAG_RE = /<cti-schedule>\s*([\s\S]*?)\s*<\/cti-schedule>/gi;
@@ -1160,6 +1178,7 @@ export async function handleCommand(
         '/model default - Use the default model',
         '/mode plan|code|ask - Change mode',
         '/status - Show current status',
+        '/restart - Request a safe daemon restart',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
         '/task in <2m|30s|1h> <instruction> - Schedule one agent task',
@@ -1311,6 +1330,16 @@ export async function handleCommand(
         `Mode: <b>${binding.mode}</b>`,
         `Model: <code>${escapeHtml(modelState.currentModel || 'runtime default')}</code>`,
         `Model Override: <code>${escapeHtml(modelState.bindingModel || 'none')}</code>`,
+      ].join('\n');
+      break;
+    }
+
+    case '/restart': {
+      const requestPath = requestSafeRestart();
+      response = [
+        'Safe restart requested.',
+        'The daemon will restart after the current chat turn completes.',
+        `Request file: <code>${escapeHtml(requestPath)}</code>`,
       ].join('\n');
       break;
     }
@@ -1468,6 +1497,7 @@ export async function handleCommand(
         '/model default - Use the default model',
         '/mode plan|code|ask - Change mode',
         '/status - Show current status',
+        '/restart - Request a safe daemon restart',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
         '/task in <2m|30s|1h> <instruction> - Schedule one agent task',
