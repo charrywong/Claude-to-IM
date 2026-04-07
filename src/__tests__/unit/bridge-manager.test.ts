@@ -195,6 +195,7 @@ class CommandTestStore implements BridgeStore {
   private settings = new Map<string, string>();
   private sessions = new Map<string, BridgeSession>();
   private bindings = new Map<string, ChannelBinding>();
+  private bots = new Map<string, import('../../lib/bridge/host').BotInstance>();
 
   constructor(defaultModel = 'claude-default') {
     this.settings.set('bridge_default_model', defaultModel);
@@ -267,6 +268,12 @@ class CommandTestStore implements BridgeStore {
   syncSdkTasks() {}
   getProvider() { return undefined; }
   getDefaultProviderId() { return null; }
+  getBotInstance(id: string) { return this.bots.get(id) ?? null; }
+  listBotInstances() { return Array.from(this.bots.values()); }
+  addBotInstance(bot: import('../../lib/bridge/host').BotInstance) {
+    this.bots.set(bot.id, bot);
+    return bot;
+  }
   insertAuditLog() {}
   checkDedup() { return false; }
   insertDedup() {}
@@ -466,5 +473,34 @@ describe('bridge-manager model commands', () => {
       else process.env.CTI_HOME = oldCtiHome;
       fs.rmSync(tmpHome, { recursive: true, force: true });
     }
+  });
+});
+
+describe('bridge-manager bot commands', () => {
+  beforeEach(() => {
+    delete (globalThis as Record<string, unknown>)['__bridge_context__'];
+  });
+
+  it('parses /bot add params when values are separated by spaces after =', async () => {
+    const store = new CommandTestStore('claude-default');
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream<string>() },
+      permissions: { resolvePendingPermission: () => true },
+      lifecycle: {},
+    });
+
+    const adapter = new TestAdapter();
+    const command = '/bot add feishu feishu_im_bot /Users/wangchaoyang/bot appId= cli_a95efb2d20f8dcba appSecret= PLjXrN3F05pYasUmcN1OsghmmNLH2NbK domain=feishu';
+    await handleCommand(adapter, createCommandMessage(command), command);
+
+    const bot = store.getBotInstance('feishu_im_bot');
+    assert.ok(bot);
+    assert.deepStrictEqual(bot.credentials, {
+      appId: 'cli_a95efb2d20f8dcba',
+      appSecret: 'PLjXrN3F05pYasUmcN1OsghmmNLH2NbK',
+      domain: 'feishu',
+    });
+    assert.match(adapter.sent[0].text, /Bot <code>feishu_im_bot<\/code> added\./);
   });
 });

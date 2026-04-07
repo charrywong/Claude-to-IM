@@ -133,6 +133,19 @@ const FEISHU_FILE_TYPE_BY_EXT: Record<string, 'opus' | 'mp4' | 'pdf' | 'doc' | '
 /** Pseudo-tool tag emitted by the model when it intentionally wants the bridge to send a local file. */
 const SEND_FILE_TAG_RE = /<cti-send-file\s+path=(["'])(\/[^"']+)\1\s*\/>/g;
 
+function extractFeishuErrorCode(err: unknown): number | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const directCode = (err as { code?: unknown }).code;
+  if (typeof directCode === 'number') return directCode;
+  const responseCode = (err as { response?: { data?: { code?: unknown } } }).response?.data?.code;
+  return typeof responseCode === 'number' ? responseCode : undefined;
+}
+
+function isMissingOrWithdrawnMessageError(err: unknown): boolean {
+  const code = extractFeishuErrorCode(err);
+  return code === 231003 || code === 230011;
+}
+
 export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
   readonly botInstanceId: string;
@@ -329,8 +342,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
         this.typingReactions.set(chatId, reactionId);
       }
     }).catch((err) => {
-      const code = (err as { code?: number })?.code;
-      if (code !== 99991400 && code !== 99991403) {
+      const code = extractFeishuErrorCode(err);
+      if (code !== 99991400 && code !== 99991403 && !isMissingOrWithdrawnMessageError(err)) {
         console.warn('[feishu-adapter] Typing indicator failed:', err instanceof Error ? err.message : err);
       }
     });
@@ -454,10 +467,24 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const cardContent = JSON.stringify({ type: 'card', data: { card_id: cardId } });
       let msgResp;
       if (replyToMessageId) {
-        msgResp = await this.restClient.im.message.reply({
-          path: { message_id: replyToMessageId },
-          data: { content: cardContent, msg_type: 'interactive' },
-        });
+        try {
+          msgResp = await this.restClient.im.message.reply({
+            path: { message_id: replyToMessageId },
+            data: { content: cardContent, msg_type: 'interactive' },
+          });
+        } catch (err) {
+          if (!isMissingOrWithdrawnMessageError(err)) {
+            throw err;
+          }
+          msgResp = await this.restClient.im.message.create({
+            params: { receive_id_type: 'chat_id' },
+            data: {
+              receive_id: chatId,
+              msg_type: 'interactive',
+              content: cardContent,
+            },
+          });
+        }
       } else {
         msgResp = await this.restClient.im.message.create({
           params: { receive_id_type: 'chat_id' },

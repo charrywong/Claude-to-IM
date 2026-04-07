@@ -382,13 +382,29 @@ function requestSafeRestart(requestedBy = 'bridge-command'): string {
 
 function parseBotParams(raw: string[]): Record<string, string> {
   const params: Record<string, string> = {};
+  let pendingKey: string | null = null;
   for (const item of raw) {
     const eq = item.indexOf('=');
-    if (eq <= 0) continue;
-    const key = item.slice(0, eq).trim();
-    const value = item.slice(eq + 1).trim();
-    if (!key || !value) continue;
-    params[key] = value;
+    if (eq > 0) {
+      const key = item.slice(0, eq).trim();
+      const value = item.slice(eq + 1).trim();
+      if (!key) {
+        pendingKey = null;
+        continue;
+      }
+      if (value) {
+        params[key] = value;
+        pendingKey = null;
+        continue;
+      }
+      pendingKey = key;
+      continue;
+    }
+    if (pendingKey) {
+      const value = item.trim();
+      if (value) params[pendingKey] = value;
+      pendingKey = null;
+    }
   }
   return params;
 }
