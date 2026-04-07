@@ -12,10 +12,17 @@ import type {
   PreviewCapabilities,
   SendResult,
 } from './types.js';
+import type { BotInstance } from './host.js';
 
 export abstract class BaseChannelAdapter {
   /** Which channel type this adapter handles */
   abstract readonly channelType: ChannelType;
+  /** Which bot instance owns this adapter runtime. */
+  readonly botInstanceId: string = 'default';
+
+  get adapterKey(): string {
+    return `${this.channelType}:${this.botInstanceId}`;
+  }
 
   /**
    * Start the adapter (connect, begin polling/websocket, etc.).
@@ -120,15 +127,15 @@ export abstract class BaseChannelAdapter {
 
 // ── Adapter Registry ────────────────────────────────────────────
 
-const adapterFactories = new Map<string, () => BaseChannelAdapter>();
+const adapterFactories = new Map<string, (bot: BotInstance) => BaseChannelAdapter>();
 
-export function registerAdapterFactory(channelType: string, factory: () => BaseChannelAdapter): void {
+export function registerAdapterFactory(channelType: string, factory: (bot: BotInstance) => BaseChannelAdapter): void {
   adapterFactories.set(channelType, factory);
 }
 
-export function createAdapter(channelType: string): BaseChannelAdapter | null {
-  const factory = adapterFactories.get(channelType);
-  return factory ? factory() : null;
+export function createAdapter(bot: BotInstance): BaseChannelAdapter | null {
+  const factory = adapterFactories.get(bot.channelType);
+  return factory ? factory(bot) : null;
 }
 
 export function getRegisteredTypes(): string[] {

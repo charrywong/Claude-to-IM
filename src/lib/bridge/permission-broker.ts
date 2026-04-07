@@ -121,6 +121,7 @@ export async function forwardPermissionRequest(
   if (result.ok && result.messageId) {
     try {
       store.insertPermissionLink({
+        botInstanceId: address.botInstanceId,
         permissionRequestId,
         channelType: adapter.channelType,
         chatId: address.chatId,
@@ -145,6 +146,7 @@ export function handlePermissionCallback(
   callbackData: string,
   callbackChatId: string,
   callbackMessageId?: string,
+  botInstanceId?: string,
 ): boolean {
   const { store, permissions } = getBridgeContext();
 
@@ -156,7 +158,7 @@ export function handlePermissionCallback(
   const permissionRequestId = parts.slice(2).join(':'); // permId might contain colons
 
   // Look up the permission link to validate origin and check dedup
-  const link = store.getPermissionLink(permissionRequestId);
+  const link = store.getPermissionLink(permissionRequestId, botInstanceId);
   if (!link) {
     console.warn(`[permission-broker] No permission link found for ${permissionRequestId}`);
     return false;
@@ -184,7 +186,7 @@ export function handlePermissionCallback(
   // to prevent race conditions with concurrent button clicks
   let claimed: boolean;
   try {
-    claimed = store.markPermissionLinkResolved(permissionRequestId);
+    claimed = store.markPermissionLinkResolved(permissionRequestId, botInstanceId);
   } catch {
     return false;
   }

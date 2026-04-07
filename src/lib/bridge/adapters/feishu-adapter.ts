@@ -28,6 +28,7 @@ import type { FileAttachment } from '../types.js';
 import type { ToolCallInfo } from '../types.js';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
 import { getBridgeContext } from '../context.js';
+import type { BotInstance } from '../host.js';
 import {
   htmlToFeishuMarkdown,
   preprocessFeishuMarkdown,
@@ -134,6 +135,8 @@ const SEND_FILE_TAG_RE = /<cti-send-file\s+path=(["'])(\/[^"']+)\1\s*\/>/g;
 
 export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
+  readonly botInstanceId: string;
+  private bot: BotInstance;
 
   private running = false;
   private queue: InboundMessage[] = [];
@@ -153,6 +156,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /** In-flight card creation promises per chatId — prevents duplicate creation. */
   private cardCreatePromises = new Map<string, Promise<boolean>>();
 
+  constructor(bot?: BotInstance) {
+    super();
+    this.bot = bot || {
+      id: 'feishu_default',
+      channelType: 'feishu',
+      enabled: true,
+      credentials: {},
+      defaults: { workdir: process.env.HOME || '', mode: 'code' },
+    };
+    this.botInstanceId = this.bot.id;
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -164,9 +179,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret') || '';
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
+    const appId = String(this.bot.credentials.appId || '');
+    const appSecret = String(this.bot.credentials.appSecret || '');
+    const domainSetting = String(this.bot.credentials.domain || 'feishu');
     const domain = domainSetting === 'lark'
       ? lark.Domain.Lark
       : lark.Domain.Feishu;
@@ -366,6 +381,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         messageId: messageId || `card_action_${Date.now()}`,
         address: {
           channelType: 'feishu',
+          botInstanceId: this.botInstanceId,
           chatId,
           userId,
         },
@@ -1088,20 +1104,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const enabled = getBridgeContext().store.getSetting('bridge_feishu_enabled');
-    if (enabled !== 'true') return 'bridge_feishu_enabled is not true';
-
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id');
+    const appId = String(this.bot.credentials.appId || '');
     if (!appId) return 'bridge_feishu_app_id not configured';
 
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret');
+    const appSecret = String(this.bot.credentials.appSecret || '');
     if (!appSecret) return 'bridge_feishu_app_secret not configured';
 
     return null;
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_feishu_allowed_users') || '';
+    const allowedUsers = Array.isArray(this.bot.security?.allowedUsers)
+      ? this.bot.security.allowedUsers.map((value) => String(value)).join(',')
+      : '';
     if (!allowedUsers) {
       // No restriction configured — allow all
       return true;
@@ -1182,6 +1197,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         try {
           getBridgeContext().store.insertAuditLog({
             channelType: 'feishu',
+            botInstanceId: this.botInstanceId,
             chatId,
             direction: 'inbound',
             messageId: msg.message_id,
@@ -1216,6 +1232,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           try {
             getBridgeContext().store.insertAuditLog({
               channelType: 'feishu',
+              botInstanceId: this.botInstanceId,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -1239,6 +1256,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           try {
             getBridgeContext().store.insertAuditLog({
               channelType: 'feishu',
+              botInstanceId: this.botInstanceId,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -1272,6 +1290,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const timestamp = parseInt(msg.create_time, 10) || Date.now();
     const address = {
       channelType: 'feishu' as const,
+      botInstanceId: this.botInstanceId,
       chatId,
       userId,
     };
@@ -1313,6 +1332,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         : text.slice(0, 200);
       getBridgeContext().store.insertAuditLog({
         channelType: 'feishu',
+        botInstanceId: this.botInstanceId,
         chatId,
         direction: 'inbound',
         messageId: msg.message_id,
@@ -1580,4 +1600,4 @@ export class FeishuAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create FeishuAdapter via the registry.
-registerAdapterFactory('feishu', () => new FeishuAdapter());
+registerAdapterFactory('feishu', (bot) => new FeishuAdapter(bot));

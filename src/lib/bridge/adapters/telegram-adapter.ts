@@ -16,6 +16,7 @@ import type {
 import type { FileAttachment } from '../types.js';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
 import { getBridgeContext } from '../context.js';
+import type { BotInstance } from '../host.js';
 import { callTelegramApi, sendMessageDraft } from './telegram-utils.js';
 import {
   isImageEnabled,
@@ -72,6 +73,8 @@ const MEDIA_GROUP_DEBOUNCE_MS = 500;
 
 export class TelegramAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'telegram';
+  readonly botInstanceId: string;
+  private bot: BotInstance;
 
   private running = false;
   private abortController: AbortController | null = null;
@@ -89,8 +92,20 @@ export class TelegramAdapter extends BaseChannelAdapter {
   /** Stable bot user ID from Telegram's getMe, used for offset key identity. */
   private botUserId: string | null = null;
 
+  constructor(bot?: BotInstance) {
+    super();
+    this.bot = bot || {
+      id: 'telegram_default',
+      channelType: 'telegram',
+      enabled: true,
+      credentials: {},
+      defaults: { workdir: process.env.HOME || '', mode: 'code' },
+    };
+    this.botInstanceId = this.bot.id;
+  }
+
   get botToken(): string {
-    return getBridgeContext().store.getSetting('telegram_bot_token') || '';
+    return String(this.bot.credentials.botToken || '');
   }
 
   async start(): Promise<void> {
@@ -217,18 +232,17 @@ export class TelegramAdapter extends BaseChannelAdapter {
   }
 
   validateConfig(): string | null {
-    const token = getBridgeContext().store.getSetting('telegram_bot_token');
+    const token = this.botToken;
     if (!token) return 'telegram_bot_token not configured';
-
-    const bridgeEnabled = getBridgeContext().store.getSetting('bridge_telegram_enabled');
-    if (bridgeEnabled !== 'true') return 'bridge_telegram_enabled is not true';
 
     return null;
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
     // Check bridge-specific allowed users first
-    const allowedUsers = getBridgeContext().store.getSetting('telegram_bridge_allowed_users') || '';
+    const allowedUsers = Array.isArray(this.bot.security?.allowedUsers)
+      ? this.bot.security.allowedUsers.map((value) => String(value)).join(',')
+      : '';
     if (allowedUsers) {
       const allowed = allowedUsers.split(',').map(s => s.trim()).filter(Boolean);
       if (allowed.length > 0) {
@@ -237,7 +251,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     }
 
     // Fallback: check notification bot's chat_id
-    const notifyChatId = getBridgeContext().store.getSetting('telegram_chat_id') || '';
+    const notifyChatId = String(this.bot.credentials.chatId || '');
     if (notifyChatId) {
       return chatId === notifyChatId;
     }
@@ -520,6 +534,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
               messageId: cb.id,
               address: {
                 channelType: 'telegram',
+                botInstanceId: this.botInstanceId,
                 chatId,
                 userId,
                 displayName: cb.from.username || cb.from.first_name,
@@ -571,6 +586,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
                 messageId: String(m.message_id),
                 address: {
                   channelType: 'telegram',
+                  botInstanceId: this.botInstanceId,
                   chatId,
                   userId,
                   displayName,
@@ -585,6 +601,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
               try {
                 getBridgeContext().store.insertAuditLog({
                   channelType: 'telegram',
+                  botInstanceId: this.botInstanceId,
                   chatId,
                   direction: 'inbound',
                   messageId: String(m.message_id),
@@ -642,7 +659,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
   ): Promise<void> {
     const m = update.message!;
     const token = this.botToken;
-    const address = { channelType: 'telegram' as const, chatId, userId, displayName };
+    const address = { channelType: 'telegram' as const, botInstanceId: this.botInstanceId, chatId, userId, displayName };
 
     if (!token) {
       this.markUpdateProcessed(update.update_id);
@@ -691,6 +708,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     try {
       getBridgeContext().store.insertAuditLog({
         channelType: 'telegram',
+        botInstanceId: this.botInstanceId,
         chatId,
         direction: 'inbound',
         messageId: String(m.message_id),
@@ -754,6 +772,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
 
     const address = {
       channelType: 'telegram' as const,
+      botInstanceId: this.botInstanceId,
       chatId: entry.chatId,
       userId: entry.userId,
       displayName: entry.displayName,
@@ -832,6 +851,7 @@ export class TelegramAdapter extends BaseChannelAdapter {
     try {
       getBridgeContext().store.insertAuditLog({
         channelType: 'telegram',
+        botInstanceId: this.botInstanceId,
         chatId: entry.chatId,
         direction: 'inbound',
         messageId: firstMessageId,
@@ -862,4 +882,4 @@ export class TelegramAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create TelegramAdapter via the registry.
-registerAdapterFactory('telegram', () => new TelegramAdapter());
+registerAdapterFactory('telegram', (bot) => new TelegramAdapter(bot));

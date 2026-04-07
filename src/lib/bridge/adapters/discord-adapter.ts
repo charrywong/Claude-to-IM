@@ -22,6 +22,7 @@ import type {
 import type { FileAttachment } from '../types.js';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
 import { getBridgeContext } from '../context.js';
+import type { BotInstance } from '../host.js';
 
 /** Max number of message IDs to keep for dedup. */
 const DEDUP_MAX = 1000;
@@ -54,6 +55,8 @@ async function loadDiscordJs() {
 
 export class DiscordAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'discord';
+  readonly botInstanceId: string;
+  private bot: BotInstance;
 
   private running = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -71,6 +74,18 @@ export class DiscordAdapter extends BaseChannelAdapter {
   /** Chats where preview has permanently failed. */
   private previewDegraded = new Set<string>();
 
+  constructor(bot?: BotInstance) {
+    super();
+    this.bot = bot || {
+      id: 'discord_default',
+      channelType: 'discord',
+      enabled: true,
+      credentials: {},
+      defaults: { workdir: process.env.HOME || '', mode: 'code' },
+    };
+    this.botInstanceId = this.bot.id;
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -82,7 +97,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const token = getBridgeContext().store.getSetting('bridge_discord_bot_token') || '';
+    const token = String(this.bot.credentials.botToken || '');
 
     // Dynamic import to avoid bundler resolving native modules
     const djs = await loadDiscordJs();
@@ -369,18 +384,19 @@ export class DiscordAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const enabled = getBridgeContext().store.getSetting('bridge_discord_enabled');
-    if (enabled !== 'true') return 'bridge_discord_enabled is not true';
-
-    const token = getBridgeContext().store.getSetting('bridge_discord_bot_token');
+    const token = String(this.bot.credentials.botToken || '');
     if (!token) return 'bridge_discord_bot_token not configured';
 
     return null;
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_discord_allowed_users') || '';
-    const allowedChannels = getBridgeContext().store.getSetting('bridge_discord_allowed_channels') || '';
+    const allowedUsers = Array.isArray(this.bot.security?.allowedUsers)
+      ? this.bot.security.allowedUsers.map((value) => String(value)).join(',')
+      : '';
+    const allowedChannels = Array.isArray(this.bot.security?.allowedChannels)
+      ? this.bot.security.allowedChannels.map((value) => String(value)).join(',')
+      : '';
 
     // If both are empty, deny all (security-first, default-deny)
     if (!allowedUsers && !allowedChannels) return false;
@@ -435,7 +451,9 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     // Guild (server) message policy
     if (isGuild) {
-      const allowedGuilds = (getBridgeContext().store.getSetting('bridge_discord_allowed_guilds') || '')
+      const allowedGuilds = (Array.isArray(this.bot.security?.allowedGuilds)
+        ? this.bot.security.allowedGuilds.map((value) => String(value)).join(',')
+        : '')
         .split(',').map(s => s.trim()).filter(Boolean);
 
       if (allowedGuilds.length > 0 && !allowedGuilds.includes(message.guild!.id)) {
@@ -466,6 +484,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
           try {
             getBridgeContext().store.insertAuditLog({
               channelType: 'discord',
+              botInstanceId: this.botInstanceId,
               chatId,
               direction: 'inbound',
               messageId: message.id,
@@ -537,6 +556,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     const address = {
       channelType: 'discord' as const,
+      botInstanceId: this.botInstanceId,
       chatId,
       userId,
       displayName,
@@ -557,6 +577,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
         : text.slice(0, 200);
       getBridgeContext().store.insertAuditLog({
         channelType: 'discord',
+        botInstanceId: this.botInstanceId,
         chatId,
         direction: 'inbound',
         messageId: message.id,
@@ -600,6 +621,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       messageId: interactionId,
       address: {
         channelType: 'discord',
+        botInstanceId: this.botInstanceId,
         chatId,
         userId,
         displayName,
@@ -659,4 +681,4 @@ export class DiscordAdapter extends BaseChannelAdapter {
 }
 
 // Self-register so bridge-manager can create DiscordAdapter via the registry.
-registerAdapterFactory('discord', () => new DiscordAdapter());
+registerAdapterFactory('discord', (bot) => new DiscordAdapter(bot));

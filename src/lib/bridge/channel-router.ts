@@ -14,7 +14,8 @@ import { getBridgeContext } from './context.js';
  */
 export function resolve(address: ChannelAddress): ChannelBinding {
   const { store } = getBridgeContext();
-  const existing = store.getChannelBinding(address.channelType, address.chatId);
+  const botInstanceId = address.botInstanceId || `${address.channelType}_default`;
+  const existing = store.getChannelBinding(address.channelType, address.chatId, botInstanceId);
   if (existing) {
     // Verify the linked session still exists; if not, create a new one
     const session = store.getSession(existing.codepilotSessionId);
@@ -33,12 +34,16 @@ export function createBinding(
   workingDirectory?: string,
 ): ChannelBinding {
   const { store } = getBridgeContext();
+  const botInstanceId = address.botInstanceId || `${address.channelType}_default`;
+  const bot = store.getBotInstance?.(botInstanceId) ?? null;
   const defaultCwd = workingDirectory
+    || bot?.defaults.workdir
     || store.getSetting('bridge_default_work_dir')
     || process.env.HOME
     || '';
-  const defaultModel = store.getSetting('bridge_default_model') || '';
-  const defaultProviderId = store.getSetting('bridge_default_provider_id') || '';
+  const defaultModel = bot?.defaults.model || store.getSetting('bridge_default_model') || '';
+  const defaultProviderId = bot?.defaults.providerId || store.getSetting('bridge_default_provider_id') || '';
+  const defaultMode = bot?.defaults.mode || 'code';
 
   const displayName = address.displayName || address.chatId;
   const session = store.createSession(
@@ -46,7 +51,8 @@ export function createBinding(
     defaultModel,
     undefined,
     defaultCwd,
-    'code',
+    defaultMode,
+    botInstanceId,
   );
 
   if (defaultProviderId) {
@@ -54,13 +60,14 @@ export function createBinding(
   }
 
   return store.upsertChannelBinding({
+    botInstanceId,
     channelType: address.channelType,
     chatId: address.chatId,
     codepilotSessionId: session.id,
     sdkSessionId: '',
     workingDirectory: defaultCwd,
     model: defaultModel,
-    mode: 'code',
+    mode: defaultMode,
   });
 }
 
@@ -72,15 +79,18 @@ export function bindToSession(
   codepilotSessionId: string,
 ): ChannelBinding | null {
   const { store } = getBridgeContext();
+  const botInstanceId = address.botInstanceId || `${address.channelType}_default`;
   const session = store.getSession(codepilotSessionId);
   if (!session) return null;
 
   return store.upsertChannelBinding({
+    botInstanceId,
     channelType: address.channelType,
     chatId: address.chatId,
     codepilotSessionId,
     workingDirectory: session.working_directory,
     model: session.model,
+    mode: (session.mode as 'code' | 'plan' | 'ask') || 'code',
   });
 }
 

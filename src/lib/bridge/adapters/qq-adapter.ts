@@ -19,6 +19,7 @@ import type {
 import type { FileAttachment } from '../types.js';
 import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
 import { getBridgeContext } from '../context.js';
+import type { BotInstance } from '../host.js';
 import {
   getAccessToken,
   getGatewayUrl,
@@ -35,6 +36,8 @@ import {
 
 export class QQAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'qq';
+  readonly botInstanceId: string;
+  private bot: BotInstance;
 
   private _running = false;
   private queue: InboundMessage[] = [];
@@ -48,6 +51,33 @@ export class QQAdapter extends BaseChannelAdapter {
   private maxReconnectAttempts = 10;
   private shouldReconnect = false;
 
+  constructor(bot?: BotInstance) {
+    super();
+    this.bot = bot || {
+      id: 'qq_default',
+      channelType: 'qq',
+      enabled: true,
+      credentials: {},
+      defaults: { workdir: process.env.HOME || '', mode: 'code' },
+    };
+    this.botInstanceId = this.bot.id;
+  }
+
+  private get appId(): string {
+    return String(this.bot.credentials.appId || getBridgeContext().store.getSetting('bridge_qq_app_id') || '');
+  }
+
+  private get appSecret(): string {
+    return String(this.bot.credentials.appSecret || getBridgeContext().store.getSetting('bridge_qq_app_secret') || '');
+  }
+
+  private get allowedUsersCsv(): string {
+    if (Array.isArray(this.bot.security?.allowedUsers) && this.bot.security.allowedUsers.length > 0) {
+      return this.bot.security.allowedUsers.map((value) => String(value)).join(',');
+    }
+    return getBridgeContext().store.getSetting('bridge_qq_allowed_users') || '';
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -59,9 +89,8 @@ export class QQAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const store = getBridgeContext().store;
-    const appId = store.getSetting('bridge_qq_app_id') || '';
-    const appSecret = store.getSetting('bridge_qq_app_secret') || '';
+    const appId = this.appId;
+    const appSecret = this.appSecret;
 
     clearTokenCache();
 
@@ -136,9 +165,8 @@ export class QQAdapter extends BaseChannelAdapter {
     }
 
     try {
-      const store = getBridgeContext().store;
-      const appId = store.getSetting('bridge_qq_app_id') || '';
-      const appSecret = store.getSetting('bridge_qq_app_secret') || '';
+      const appId = this.appId;
+      const appSecret = this.appSecret;
 
       const token = await getAccessToken(appId, appSecret);
       const msgSeq = nextMsgSeq(message.replyToMessageId);
@@ -162,18 +190,17 @@ export class QQAdapter extends BaseChannelAdapter {
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const store = getBridgeContext().store;
-    const appId = store.getSetting('bridge_qq_app_id');
+    const appId = this.appId;
     if (!appId) return 'bridge_qq_app_id not configured';
 
-    const appSecret = store.getSetting('bridge_qq_app_secret');
+    const appSecret = this.appSecret;
     if (!appSecret) return 'bridge_qq_app_secret not configured';
 
     return null;
   }
 
   isAuthorized(userId: string, _chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_qq_allowed_users') || '';
+    const allowedUsers = this.allowedUsersCsv;
     if (!allowedUsers) return true;
 
     const allowed = allowedUsers
@@ -320,13 +347,14 @@ export class QQAdapter extends BaseChannelAdapter {
     const text = (data.content || '').trim();
     const address = {
       channelType: 'qq' as const,
+      botInstanceId: this.botInstanceId,
       chatId: userId,
       userId,
       displayName: userId.slice(0, 8),
     };
 
     // Filter image attachments
-    const imageEnabled = getBridgeContext().store.getSetting('bridge_qq_image_enabled') !== 'false';
+    const imageEnabled = this.bot.features?.imageEnabled !== false;
     const imageAttachments = imageEnabled
       ? (data.attachments || []).filter((a) => a.content_type?.startsWith('image/'))
       : [];
@@ -378,6 +406,7 @@ export class QQAdapter extends BaseChannelAdapter {
             : `[${failedCount} image(s) failed] ${text.slice(0, 150)}`;
           getBridgeContext().store.insertAuditLog({
             channelType: 'qq',
+            botInstanceId: this.botInstanceId,
             chatId: userId,
             direction: 'inbound',
             messageId: data.id,
@@ -400,6 +429,7 @@ export class QQAdapter extends BaseChannelAdapter {
       try {
         getBridgeContext().store.insertAuditLog({
           channelType: 'qq',
+          botInstanceId: this.botInstanceId,
           chatId: userId,
           direction: 'inbound',
           messageId: data.id,
@@ -415,7 +445,7 @@ export class QQAdapter extends BaseChannelAdapter {
     attachments: QQAttachment[],
   ): Promise<{ files: FileAttachment[]; failedCount: number }> {
     const maxSizeMB = parseInt(
-      getBridgeContext().store.getSetting('bridge_qq_max_image_size') || '20',
+      String(this.bot.features?.maxImageSize || '20'),
       10,
     ) || 20;
     const maxSizeBytes = maxSizeMB * 1024 * 1024;
@@ -516,9 +546,8 @@ export class QQAdapter extends BaseChannelAdapter {
       if (!this.shouldReconnect) return;
 
       try {
-        const store = getBridgeContext().store;
-        const appId = store.getSetting('bridge_qq_app_id') || '';
-        const appSecret = store.getSetting('bridge_qq_app_secret') || '';
+        const appId = this.appId;
+        const appSecret = this.appSecret;
         const token = await getAccessToken(appId, appSecret);
         const gatewayUrl = await getGatewayUrl(token);
         await this.connectGateway(gatewayUrl, token);
@@ -549,4 +578,4 @@ interface QQAttachment {
 }
 
 // Self-register so bridge-manager can create QQAdapter via the registry.
-registerAdapterFactory('qq', () => new QQAdapter());
+registerAdapterFactory('qq', (bot) => new QQAdapter(bot));

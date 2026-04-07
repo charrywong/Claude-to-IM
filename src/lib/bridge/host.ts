@@ -63,15 +63,36 @@ export interface BridgeApiProvider {
   [key: string]: unknown;
 }
 
+export interface BotInstance {
+  id: string;
+  channelType: ChannelType;
+  enabled: boolean;
+  credentials: Record<string, unknown>;
+  defaults: {
+    workdir: string;
+    model?: string;
+    mode?: 'code' | 'plan' | 'ask';
+    providerId?: string;
+  };
+  security?: Record<string, unknown>;
+  features?: Record<string, unknown>;
+  metadata?: {
+    name?: string;
+    description?: string;
+  };
+}
+
 // ── Session & Message types ──────────────────────────────────
 
 /** Minimal session object returned by the store. */
 export interface BridgeSession {
   id: string;
+  botInstanceId?: string;
   working_directory: string;
   model: string;
   system_prompt?: string;
   provider_id?: string;
+  mode?: string;
 }
 
 /** Minimal message object returned by the store. */
@@ -90,6 +111,7 @@ export interface SettingsProvider {
 
 /** Input for creating an audit log entry. */
 export interface AuditLogInput {
+  botInstanceId?: string;
   channelType: string;
   chatId: string;
   direction: 'inbound' | 'outbound';
@@ -99,6 +121,7 @@ export interface AuditLogInput {
 
 /** Input for inserting a permission link. */
 export interface PermissionLinkInput {
+  botInstanceId?: string;
   permissionRequestId: string;
   channelType: string;
   chatId: string;
@@ -109,6 +132,7 @@ export interface PermissionLinkInput {
 
 /** Stored permission link record. */
 export interface PermissionLinkRecord {
+  botInstanceId?: string;
   permissionRequestId: string;
   chatId: string;
   messageId: string;
@@ -118,6 +142,7 @@ export interface PermissionLinkRecord {
 
 /** Input for inserting an outbound reference. */
 export interface OutboundRefInput {
+  botInstanceId?: string;
   channelType: string;
   chatId: string;
   codepilotSessionId: string;
@@ -127,6 +152,7 @@ export interface OutboundRefInput {
 
 /** Input for upserting a channel binding. */
 export interface UpsertChannelBindingInput {
+  botInstanceId?: string;
   channelType: string;
   chatId: string;
   codepilotSessionId: string;
@@ -145,10 +171,10 @@ export interface BridgeStore {
   getSetting(key: string): string | null;
 
   // ── Channel bindings ──
-  getChannelBinding(channelType: string, chatId: string): ChannelBinding | null;
+  getChannelBinding(channelType: string, chatId: string, botInstanceId?: string): ChannelBinding | null;
   upsertChannelBinding(data: UpsertChannelBindingInput): ChannelBinding;
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>): void;
-  listChannelBindings(channelType?: ChannelType): ChannelBinding[];
+  listChannelBindings(channelType?: ChannelType, botInstanceId?: string): ChannelBinding[];
 
   // ── Sessions ──
   getSession(id: string): BridgeSession | null;
@@ -158,6 +184,7 @@ export interface BridgeStore {
     systemPrompt?: string,
     cwd?: string,
     mode?: string,
+    botInstanceId?: string,
   ): BridgeSession;
   updateSessionProviderId(sessionId: string, providerId: string): void;
 
@@ -180,6 +207,12 @@ export interface BridgeStore {
   getProvider(id: string): BridgeApiProvider | undefined;
   getDefaultProviderId(): string | null;
 
+  // ── Bot instances ──
+  getBotInstance?(id: string): BotInstance | null;
+  listBotInstances?(channelType?: ChannelType): BotInstance[];
+  addBotInstance?(bot: BotInstance): BotInstance;
+  deleteBotInstance?(id: string): boolean;
+
   // ── Audit & dedup ──
   insertAuditLog(entry: AuditLogInput): void;
   checkDedup(key: string): boolean;
@@ -189,10 +222,10 @@ export interface BridgeStore {
 
   // ── Permission links ──
   insertPermissionLink(link: PermissionLinkInput): void;
-  getPermissionLink(permissionRequestId: string): PermissionLinkRecord | null;
-  markPermissionLinkResolved(permissionRequestId: string): boolean;
+  getPermissionLink(permissionRequestId: string, botInstanceId?: string): PermissionLinkRecord | null;
+  markPermissionLinkResolved(permissionRequestId: string, botInstanceId?: string): boolean;
   /** List unresolved permission links for a given chat. */
-  listPendingPermissionLinksByChat(chatId: string): PermissionLinkRecord[];
+  listPendingPermissionLinksByChat(chatId: string, botInstanceId?: string): PermissionLinkRecord[];
 
   // ── Channel offsets (adapter watermarks) ──
   getChannelOffset(key: string): string;
@@ -245,6 +278,7 @@ export interface LLMProvider {
 
 export interface ScheduledTaskRecord {
   id: string;
+  botInstanceId?: string;
   channelType: string;
   chatId: string;
   kind: 'agent_once' | 'agent_daily';
@@ -255,6 +289,7 @@ export interface ScheduledTaskRecord {
 
 export interface SchedulerGateway {
   scheduleTaskAt(input: {
+    botInstanceId?: string;
     channelType: string;
     chatId: string;
     title: string;
@@ -264,6 +299,7 @@ export interface SchedulerGateway {
     timezone?: string;
   }): ScheduledTaskRecord;
   scheduleTaskIn(input: {
+    botInstanceId?: string;
     channelType: string;
     chatId: string;
     title?: string;
@@ -272,6 +308,7 @@ export interface SchedulerGateway {
     delayMs: number;
   }): ScheduledTaskRecord;
   scheduleTaskDaily(input: {
+    botInstanceId?: string;
     channelType: string;
     chatId: string;
     title: string;
@@ -280,8 +317,8 @@ export interface SchedulerGateway {
     timeHHMM: string;
     timezone?: string;
   }): ScheduledTaskRecord;
-  listTasks(channelType: string, chatId: string): ScheduledTaskRecord[];
-  removeTask(id: string, channelType: string, chatId: string): boolean;
+  listTasks(channelType: string, chatId: string, botInstanceId?: string): ScheduledTaskRecord[];
+  removeTask(id: string, channelType: string, chatId: string, botInstanceId?: string): boolean;
 }
 
 // ── Host Interface: Permission Gateway ───────────────────────

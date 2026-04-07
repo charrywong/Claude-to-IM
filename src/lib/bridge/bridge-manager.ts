@@ -71,12 +71,12 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
  * waiting for the permission to be resolved, so putting "1" behind the
  * session lock would deadlock.
  */
-function isNumericPermissionShortcut(channelType: string, rawText: string, chatId: string): boolean {
+function isNumericPermissionShortcut(channelType: string, rawText: string, chatId: string, botInstanceId?: string): boolean {
   if (channelType !== 'feishu' && channelType !== 'qq' && channelType !== 'weixin') return false;
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!/^[123]$/.test(normalized)) return false;
   const { store } = getBridgeContext();
-  const pending = store.listPendingPermissionLinksByChat(chatId);
+  const pending = store.listPendingPermissionLinksByChat(chatId, botInstanceId);
   return pending.length > 0; // any pending → route to inline path
 }
 
@@ -327,6 +327,7 @@ function switchBindingToModel(
     current.session?.system_prompt,
     binding.workingDirectory,
     binding.mode,
+    binding.botInstanceId,
   );
 
   if (current.session?.provider_id) {
@@ -342,7 +343,7 @@ function switchBindingToModel(
     active: true,
   });
 
-  return store.getChannelBinding(address.channelType, address.chatId) ?? binding;
+  return store.getChannelBinding(address.channelType, address.chatId, address.botInstanceId) ?? binding;
 }
 
 function buildModelStatusResponse(binding: import('./types.js').ChannelBinding): string {
@@ -377,6 +378,25 @@ function requestSafeRestart(requestedBy = 'bridge-command'): string {
     delayMs: 15_000,
   }));
   return requestPath;
+}
+
+function parseBotParams(raw: string[]): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const item of raw) {
+    const eq = item.indexOf('=');
+    if (eq <= 0) continue;
+    const key = item.slice(0, eq).trim();
+    const value = item.slice(eq + 1).trim();
+    if (!key || !value) continue;
+    params[key] = value;
+  }
+  return params;
+}
+
+function parseCsv(raw?: string): string[] | undefined {
+  if (!raw) return undefined;
+  const items = raw.split(',').map((item) => item.trim()).filter(Boolean);
+  return items.length > 0 ? items : undefined;
 }
 
 const CTI_SCHEDULE_TAG_RE = /<cti-schedule>\s*([\s\S]*?)\s*<\/cti-schedule>/gi;
@@ -470,6 +490,7 @@ function appendScheduleErrors(text: string, errors: string[]): string {
 }
 
 function materializeScheduleDirectives(
+  botInstanceId: string | undefined,
   channelType: string,
   chatId: string,
   directives: ParsedScheduleDirective[],
@@ -481,6 +502,7 @@ function materializeScheduleDirectives(
   for (const directive of directives) {
     if (directive.schedule.mode === 'once') {
       const task = scheduler.scheduleTaskAt({
+        botInstanceId,
         channelType,
         chatId,
         title: directive.title,
@@ -494,6 +516,7 @@ function materializeScheduleDirectives(
     }
 
     const task = scheduler.scheduleTaskDaily({
+      botInstanceId,
       channelType,
       chatId,
       title: directive.title,
@@ -514,9 +537,10 @@ async function sendProactiveMessage(
   parseMode: OutboundMessage['parseMode'] = 'plain',
 ): Promise<SendResult> {
   const state = getState();
-  const adapter = state.adapters.get(address.channelType);
+  const adapterKey = `${address.channelType}:${address.botInstanceId || `${address.channelType}_default`}`;
+  const adapter = state.adapters.get(adapterKey);
   if (!adapter || !adapter.isRunning()) {
-    return { ok: false, error: `Adapter not running for channel ${address.channelType}` };
+    return { ok: false, error: `Adapter not running for ${adapterKey}` };
   }
   return deliver(adapter, { address, text, parseMode });
 }
@@ -557,18 +581,40 @@ export async function start(): Promise<void> {
   }
 
   // Iterate all registered adapter types and create those that are enabled
-  for (const channelType of getRegisteredTypes()) {
-    const settingKey = `bridge_${channelType}_enabled`;
-    if (store.getSetting(settingKey) !== 'true') continue;
+  const configuredBots = store.listBotInstances?.() ?? [];
+  if (configuredBots.length > 0) {
+    for (const bot of configuredBots) {
+      if (!bot.enabled) continue;
+      if (!getRegisteredTypes().includes(bot.channelType)) continue;
 
-    const adapter = createAdapter(channelType);
-    if (!adapter) continue;
+      const adapter = createAdapter(bot);
+      if (!adapter) continue;
 
-    const configError = adapter.validateConfig();
-    if (!configError) {
-      registerAdapter(adapter);
-    } else {
-      console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
+      const configError = adapter.validateConfig();
+      if (!configError) {
+        registerAdapter(adapter);
+      } else {
+        console.warn(`[bridge-manager] ${bot.channelType}:${bot.id} adapter not valid:`, configError);
+      }
+    }
+  } else {
+    for (const channelType of getRegisteredTypes()) {
+      const settingKey = `bridge_${channelType}_enabled`;
+      if (store.getSetting(settingKey) !== 'true') continue;
+      const adapter = createAdapter({
+        id: `${channelType}_default`,
+        channelType,
+        enabled: true,
+        credentials: {},
+        defaults: { workdir: process.env.HOME || '', mode: 'code' },
+      });
+      if (!adapter) continue;
+      const configError = adapter.validateConfig();
+      if (!configError) {
+        registerAdapter(adapter);
+      } else {
+        console.warn(`[bridge-manager] ${channelType} adapter not valid:`, configError);
+      }
     }
   }
 
@@ -679,6 +725,7 @@ export function getStatus(): BridgeStatus {
       const meta = state.adapterMeta.get(type);
       return {
         channelType: adapter.channelType,
+        botInstanceId: adapter.botInstanceId,
         running: adapter.isRunning(),
         connectedAt: state.startedAt,
         lastMessageAt: meta?.lastMessageAt ?? null,
@@ -693,7 +740,7 @@ export function getStatus(): BridgeStatus {
  */
 export function registerAdapter(adapter: BaseChannelAdapter): void {
   const state = getState();
-  state.adapters.set(adapter.channelType, adapter);
+  state.adapters.set(adapter.adapterKey, adapter);
 }
 
 /**
@@ -704,7 +751,7 @@ export function registerAdapter(adapter: BaseChannelAdapter): void {
 function runAdapterLoop(adapter: BaseChannelAdapter): void {
   const state = getState();
   const abort = new AbortController();
-  state.loopAborts.set(adapter.channelType, abort);
+  state.loopAborts.set(adapter.adapterKey, abort);
 
   (async () => {
     while (state.running && adapter.isRunning()) {
@@ -723,7 +770,7 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         if (
           msg.callbackData ||
           msg.text.trim().startsWith('/') ||
-          isNumericPermissionShortcut(adapter.channelType, msg.text.trim(), msg.address.chatId)
+          isNumericPermissionShortcut(adapter.channelType, msg.text.trim(), msg.address.chatId, msg.address.botInstanceId)
         ) {
           await handleMessage(adapter, msg);
         } else {
@@ -741,9 +788,9 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[bridge-manager] Error in ${adapter.channelType} loop:`, err);
         // Track last error per adapter
-        const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+        const meta = state.adapterMeta.get(adapter.adapterKey) || { lastMessageAt: null, lastError: null };
         meta.lastError = errMsg;
-        state.adapterMeta.set(adapter.channelType, meta);
+        state.adapterMeta.set(adapter.adapterKey, meta);
         // Brief delay to prevent tight error loops
         await new Promise(r => setTimeout(r, 1000));
       }
@@ -752,9 +799,9 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
     if (!abort.signal.aborted) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[bridge-manager] ${adapter.channelType} loop crashed:`, err);
-      const meta = state.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+      const meta = state.adapterMeta.get(adapter.adapterKey) || { lastMessageAt: null, lastError: null };
       meta.lastError = errMsg;
-      state.adapterMeta.set(adapter.channelType, meta);
+      state.adapterMeta.set(adapter.adapterKey, meta);
     }
   });
 }
@@ -770,9 +817,9 @@ async function handleMessage(
 
   // Update lastMessageAt for this adapter
   const adapterState = getState();
-  const meta = adapterState.adapterMeta.get(adapter.channelType) || { lastMessageAt: null, lastError: null };
+  const meta = adapterState.adapterMeta.get(adapter.adapterKey) || { lastMessageAt: null, lastError: null };
   meta.lastMessageAt = new Date().toISOString();
-  adapterState.adapterMeta.set(adapter.channelType, meta);
+  adapterState.adapterMeta.set(adapter.adapterKey, meta);
 
   // Acknowledge the update offset after processing completes (or fails).
   // This ensures the adapter only advances its committed offset once the
@@ -785,7 +832,7 @@ async function handleMessage(
 
   // Handle callback queries (permission buttons)
   if (msg.callbackData) {
-    const handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
+    const handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId, msg.address.botInstanceId);
     if (handled) {
       // Send confirmation
       const confirmMsg: OutboundMessage = {
@@ -847,13 +894,13 @@ async function handleMessage(
     // eslint-disable-next-line no-control-regex
     const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     if (/^[123]$/.test(normalized)) {
-      const pendingLinks = store.listPendingPermissionLinksByChat(msg.address.chatId);
+      const pendingLinks = store.listPendingPermissionLinksByChat(msg.address.chatId, msg.address.botInstanceId);
       if (pendingLinks.length === 1) {
         const actionMap: Record<string, string> = { '1': 'allow', '2': 'allow_session', '3': 'deny' };
         const action = actionMap[normalized];
         const permId = pendingLinks[0].permissionRequestId;
         const callbackData = `perm:${action}:${permId}`;
-        const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId);
+        const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId, undefined, msg.address.botInstanceId);
         const label = normalized === '1' ? 'Allow' : normalized === '2' ? 'Allow Session' : 'Deny';
         if (handled) {
           await deliver(adapter, {
@@ -1046,6 +1093,7 @@ async function handleMessage(
 
     const parsedSchedules = parseScheduleDirectives(result.responseText);
     const createdTasks = materializeScheduleDirectives(
+      msg.address.botInstanceId,
       adapter.channelType,
       msg.address.chatId,
       parsedSchedules.directives,
@@ -1085,7 +1133,7 @@ async function handleMessage(
     }
 
     if (createdTasks.length > 0) {
-      console.log(`[bridge-manager] Created scheduled tasks for ${adapter.channelType}:${msg.address.chatId}: ${createdTasks.join(', ')}`);
+      console.log(`[bridge-manager] Created scheduled tasks for ${adapter.channelType}:${msg.address.botInstanceId || `${adapter.channelType}_default`}:${msg.address.chatId}: ${createdTasks.join(', ')}`);
     }
 
     // Persist the actual SDK session ID for future resume.
@@ -1185,6 +1233,9 @@ export async function handleCommand(
         '/task daily <HH:MM> <instruction> - Daily recurring agent task',
         '/task list - List scheduled tasks',
         '/task remove <id> - Remove scheduled task',
+        '/bot list - List configured bots',
+        '/bot add <channel> <id> <workdir> key=value... - Add a bot config',
+        '/bot delete <id> - Delete a bot config (cannot delete self)',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
         '/help - Show this help',
       ].join('\n');
@@ -1345,7 +1396,7 @@ export async function handleCommand(
     }
 
     case '/sessions': {
-      const bindings = router.listBindings(adapter.channelType);
+      const bindings = getBridgeContext().store.listChannelBindings(adapter.channelType, adapter.botInstanceId);
       if (bindings.length === 0) {
         response = 'No sessions found.';
       } else {
@@ -1384,12 +1435,140 @@ export async function handleCommand(
         break;
       }
       const callbackData = `perm:${permAction}:${permId}`;
-      const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId);
+      const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId, undefined, msg.address.botInstanceId);
       if (handled) {
         response = `Permission ${permAction}: recorded.`;
       } else {
         response = `Permission not found or already resolved.`;
       }
+      break;
+    }
+
+    case '/bot': {
+      const botParts = args.split(/\s+/).filter(Boolean);
+      const subcommand = (botParts[0] || '').toLowerCase();
+
+      if (subcommand === 'list') {
+        const bots = store.listBotInstances?.() || [];
+        if (bots.length === 0) {
+          response = 'No bots configured.';
+          break;
+        }
+        response = [
+          '<b>Bots</b>',
+          '',
+          ...bots.map((bot) => {
+            const current = bot.id === adapter.botInstanceId ? ' current' : '';
+            const state = bot.enabled ? 'enabled' : 'disabled';
+            return `<code>${escapeHtml(bot.id)}</code> [${escapeHtml(bot.channelType)}] ${state}${current}\n<code>${escapeHtml(bot.defaults.workdir || '~')}</code>`;
+          }),
+        ].join('\n');
+        break;
+      }
+
+      if (subcommand === 'add') {
+        if (botParts.length < 4) {
+          response = 'Usage: /bot add <channelType> <id> <workdir> key=value...';
+          break;
+        }
+        const channelType = botParts[1].toLowerCase();
+        const botId = botParts[2];
+        const workdir = botParts[3];
+        const validatedPath = validateWorkingDirectory(workdir);
+        if (!validatedPath) {
+          response = 'Invalid workdir. Must be an absolute path.';
+          break;
+        }
+        const params = parseBotParams(botParts.slice(4));
+        const defaults = {
+          workdir: validatedPath,
+          ...(params.model ? { model: params.model } : {}),
+          mode: (validateMode(params.mode || 'code') ? params.mode || 'code' : 'code') as 'code' | 'plan' | 'ask',
+          ...(params.providerId ? { providerId: params.providerId } : {}),
+        };
+        const security: Record<string, unknown> = {};
+        const allowedUsers = parseCsv(params.allowedUsers);
+        if (allowedUsers) security.allowedUsers = allowedUsers;
+        const allowedChannels = parseCsv(params.allowedChannels);
+        if (allowedChannels) security.allowedChannels = allowedChannels;
+        const allowedGuilds = parseCsv(params.allowedGuilds);
+        if (allowedGuilds) security.allowedGuilds = allowedGuilds;
+
+        const bot: import('./host.js').BotInstance = {
+          id: botId,
+          channelType,
+          enabled: true,
+          defaults,
+          credentials: {},
+          ...(Object.keys(security).length > 0 ? { security } : {}),
+        };
+
+        if (channelType === 'feishu') {
+          bot.credentials = {
+            appId: params.appId || '',
+            appSecret: params.appSecret || '',
+            domain: params.domain || 'feishu',
+          };
+        } else if (channelType === 'telegram') {
+          bot.credentials = {
+            botToken: params.botToken || '',
+            ...(params.chatId ? { chatId: params.chatId } : {}),
+          };
+        } else if (channelType === 'discord') {
+          bot.credentials = { botToken: params.botToken || '' };
+        } else if (channelType === 'qq') {
+          bot.credentials = { appId: params.appId || '', appSecret: params.appSecret || '' };
+          if (params.imageEnabled || params.maxImageSize) {
+            bot.features = {
+              ...(params.imageEnabled ? { imageEnabled: params.imageEnabled === 'true' } : {}),
+              ...(params.maxImageSize ? { maxImageSize: Number(params.maxImageSize) } : {}),
+            };
+          }
+        } else if (channelType === 'weixin') {
+          bot.credentials = {};
+        }
+
+        try {
+          if (!store.addBotInstance) {
+            response = 'Bot management is not available in this runtime.';
+            break;
+          }
+          store.addBotInstance(bot);
+          response = [
+            `Bot <code>${escapeHtml(botId)}</code> added.`,
+            `Channel: <b>${escapeHtml(channelType)}</b>`,
+            `Workdir: <code>${escapeHtml(validatedPath)}</code>`,
+            'Restart the daemon to activate the new bot.',
+          ].join('\n');
+        } catch (error) {
+          response = error instanceof Error ? escapeHtml(error.message) : 'Failed to add bot.';
+        }
+        break;
+      }
+
+      if (subcommand === 'delete') {
+        const botId = botParts[1];
+        if (!botId) {
+          response = 'Usage: /bot delete <id>';
+          break;
+        }
+        if (botId === adapter.botInstanceId) {
+          response = 'Refusing to delete the current bot instance.';
+          break;
+        }
+        response = store.deleteBotInstance?.(botId)
+          ? `Bot <code>${escapeHtml(botId)}</code> deleted. Restart the daemon to apply the change.`
+          : 'Bot not found.';
+        break;
+      }
+
+      response = [
+        '<b>Bot Commands</b>',
+        '',
+        '/bot list',
+        '/bot add <channelType> <id> <workdir> key=value...',
+        '/bot delete <id>',
+      ].join('\n');
       break;
     }
 
@@ -1402,7 +1581,7 @@ export async function handleCommand(
       const subcommand = (taskParts[0] || '').toLowerCase();
 
       if (subcommand === 'list') {
-        const tasks = scheduler.listTasks(adapter.channelType, msg.address.chatId);
+        const tasks = scheduler.listTasks(adapter.channelType, msg.address.chatId, msg.address.botInstanceId);
         if (tasks.length === 0) {
           response = 'No scheduled tasks.';
           break;
@@ -1425,7 +1604,7 @@ export async function handleCommand(
           response = 'Usage: /task remove &lt;id&gt;';
           break;
         }
-        response = scheduler.removeTask(taskId, adapter.channelType, msg.address.chatId)
+        response = scheduler.removeTask(taskId, adapter.channelType, msg.address.chatId, msg.address.botInstanceId)
           ? `Removed task <code>${escapeHtml(taskId)}</code>.`
           : 'Task not found.';
         break;
@@ -1444,6 +1623,7 @@ export async function handleCommand(
           break;
         }
         const task = scheduler.scheduleTaskIn({
+          botInstanceId: msg.address.botInstanceId,
           channelType: adapter.channelType,
           chatId: msg.address.chatId,
           title: instruction,
@@ -1463,6 +1643,7 @@ export async function handleCommand(
           break;
         }
         const task = scheduler.scheduleTaskDaily({
+          botInstanceId: msg.address.botInstanceId,
           channelType: adapter.channelType,
           chatId: msg.address.chatId,
           title: instruction,
@@ -1504,6 +1685,9 @@ export async function handleCommand(
         '/task daily <HH:MM> <instruction> - Daily recurring agent task',
         '/task list - List scheduled tasks',
         '/task remove <id> - Remove scheduled task',
+        '/bot list - List configured bots',
+        '/bot add <channelType> <id> <workdir> key=value...',
+        '/bot delete <id> - Delete a bot config',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
         '1/2/3 - Quick permission reply (Feishu/QQ/WeChat, single pending)',
         '/help - Show this help',

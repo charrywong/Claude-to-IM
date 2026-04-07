@@ -21,6 +21,7 @@ export type ChannelType = string;
 /** Unique address of a user within a channel */
 export interface ChannelAddress {
   channelType: ChannelType;
+  botInstanceId?: string;
   chatId: string;        // Platform-specific chat/channel identifier
   userId?: string;       // Platform-specific user identifier (optional for group chats)
   displayName?: string;  // Human-readable name for audit logs
@@ -89,6 +90,7 @@ export interface SendResult {
 /** Links an IM chat to a CodePilot session */
 export interface ChannelBinding {
   id: string;
+  botInstanceId?: string;
   channelType: ChannelType;
   chatId: string;
   /** CodePilot session ID this chat is bound to */
@@ -119,6 +121,7 @@ export interface BridgeStatus {
 /** Status of a single channel adapter */
 export interface AdapterStatus {
   channelType: ChannelType;
+  botInstanceId?: string;
   running: boolean;
   connectedAt: string | null;
   lastMessageAt: string | null;
