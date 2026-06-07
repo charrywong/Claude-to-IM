@@ -43,7 +43,7 @@ export type OnPartialText = (fullText: string) => void;
  * Callback invoked when tool_use or tool_result SSE events arrive.
  * Used by bridge-manager to forward tool progress to adapters for real-time display.
  */
-export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => void;
+export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', detail?: string) => void;
 export type OnStatusUpdate = (statusText: string) => void;
 
 export interface ConversationResult {
@@ -123,6 +123,41 @@ function extractStatusText(statusData: Record<string, unknown>): string | null {
     normalizeStatusText(statusData.message) ||
     normalizeStatusText(statusData.status_text) ||
     normalizeStatusText(statusData.summary)
+  );
+}
+
+function normalizeInlineDetail(value: unknown, maxLength = 96): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized) return undefined;
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, Math.max(0, maxLength - 3))}...`
+    : normalized;
+}
+
+function extractToolDetail(toolName: string, input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const toolInput = input as Record<string, unknown>;
+
+  if (toolName === 'Bash') {
+    return normalizeInlineDetail(toolInput.command, 108);
+  }
+
+  if (toolName === 'Edit' && Array.isArray(toolInput.files)) {
+    const files = toolInput.files
+      .filter((entry): entry is { path?: string } => typeof entry === 'object' && entry !== null)
+      .map((entry) => entry.path)
+      .filter((path): path is string => typeof path === 'string' && path.trim().length > 0);
+    if (files.length === 1) return normalizeInlineDetail(files[0], 72);
+    if (files.length > 1) return `${files.length} 个文件`;
+  }
+
+  return (
+    normalizeInlineDetail(toolInput.path, 84) ||
+    normalizeInlineDetail(toolInput.query, 84) ||
+    normalizeInlineDetail(toolInput.q, 84) ||
+    normalizeInlineDetail(toolInput.prompt, 84) ||
+    normalizeInlineDetail(toolInput.url, 84)
   );
 }
 
@@ -333,7 +368,7 @@ async function consumeStream(
                 input: toolData.input,
               });
               if (onToolEvent) {
-                try { onToolEvent(toolData.id, toolData.name, 'running'); } catch { /* non-critical */ }
+                try { onToolEvent(toolData.id, toolData.name, 'running', extractToolDetail(toolData.name, toolData.input)); } catch { /* non-critical */ }
               }
             } catch { /* skip */ }
             break;

@@ -4,6 +4,11 @@ interface StreamingCardMeta {
   elapsedMs?: number;
   thinking?: boolean;
   statusText?: string;
+  statusHistory?: string[];
+}
+
+interface FinalCardMeta {
+  statusHistory?: string[];
 }
 
 /**
@@ -105,9 +110,30 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return '';
   const lines = tools.map((tc) => {
     const icon = tc.status === 'running' ? '🔄' : tc.status === 'complete' ? '✅' : '❌';
-    return `${icon} \`${tc.name}\``;
+    const label = humanizeToolName(tc.name);
+    const detail = formatToolDetail(tc.detail);
+    return `${icon} \`${label}\`${detail}`;
   });
   return lines.join('\n');
+}
+
+function humanizeToolName(name: string): string {
+  if (name === 'Bash') return '执行命令';
+  if (name === 'Edit') return '修改文件';
+  if (name.startsWith('mcp__')) {
+    const parts = name.split('__').filter(Boolean);
+    if (parts.length >= 3) {
+      return `调用工具 ${parts[1]}/${parts[2]}`;
+    }
+    return '调用工具';
+  }
+  return name;
+}
+
+function formatToolDetail(detail?: string): string {
+  if (!detail) return '';
+  const safeDetail = detail.replace(/`/g, "'");
+  return ` · ${safeDetail}`;
 }
 
 /**
@@ -134,7 +160,7 @@ function buildStreamingSummary(text: string, tools: ToolCallInfo[], meta?: Strea
       : latestTool.status === 'running'
         ? '正在执行'
         : '最近完成';
-    return `${latestState}: ${latestTool.name}${elapsed}`;
+    return `${latestState}: ${humanizeToolName(latestTool.name)}${elapsed}`;
   }
   if (statusText) return `${summarizeStatusText(statusText)}${elapsed}`;
   if (meta?.thinking === false) return `正在处理中${elapsed}`;
@@ -156,29 +182,47 @@ function summarizeStatusText(statusText: string): string {
   return `${oneLine.slice(0, 41)}...`;
 }
 
+function normalizeStatusHistory(statusHistory?: string[]): string[] {
+  if (!Array.isArray(statusHistory)) return [];
+  const normalized = statusHistory
+    .map((entry) => normalizeStreamingStatusText(entry))
+    .filter((entry): entry is string => !!entry);
+  return normalized.filter((entry, index) => index === 0 || entry !== normalized[index - 1]);
+}
+
+function buildStatusHistoryMarkdown(statusHistory?: string[]): string {
+  const history = normalizeStatusHistory(statusHistory).slice(-4);
+  if (history.length === 0) return '';
+  return history
+    .map((entry, index) => `${index === history.length - 1 ? '•' : '◦'} ${entry}`)
+    .join('\n');
+}
+
 /**
  * Build the body elements array for a streaming card update.
  * Combines main text content with tool progress.
  */
 export function buildStreamingContent(text: string, tools: ToolCallInfo[], meta?: StreamingCardMeta): string {
   const trimmedText = text.trim();
-  const statusText = normalizeStreamingStatusText(meta?.statusText);
+  const statusHistoryBlock = buildStatusHistoryMarkdown(meta?.statusHistory ?? (meta?.statusText ? [meta.statusText] : []));
   const recentTools = tools.slice(-6);
   const hiddenToolCount = tools.length - recentTools.length;
   const sections = [`**${buildStreamingSummary(text, tools, meta)}**`];
 
   if (trimmedText) {
     sections.push(trimmedText);
-  } else if (statusText) {
-    sections.push(`**当前状态**\n${statusText}`);
   } else if (tools.length > 0) {
     sections.push('_任务已开始，正在持续执行中。_');
   } else {
     sections.push('_任务已开始，当前还在分析阶段。_');
   }
 
+  if (statusHistoryBlock) {
+    sections.push(`**处理进度**\n${statusHistoryBlock}`);
+  }
+
   if (recentTools.length > 0) {
-    let toolBlock = `**最近进度**\n${buildToolProgressMarkdown(recentTools)}`;
+    let toolBlock = `**工具动态**\n${buildToolProgressMarkdown(recentTools)}`;
     if (hiddenToolCount > 0) {
       toolBlock += `\n… 另有 ${hiddenToolCount} 项较早进度`;
     }
@@ -221,6 +265,7 @@ export function buildFinalCardJson(
   text: string,
   tools: ToolCallInfo[],
   footer: { status: string; elapsed: string } | null,
+  meta?: FinalCardMeta,
 ): string {
   const elements: Array<Record<string, unknown>> = [];
 
@@ -237,13 +282,25 @@ export function buildFinalCardJson(
     });
   }
 
+  const processSummary = buildFinalProcessSummary(tools, meta?.statusHistory);
+  if (processSummary) {
+    elements.push({ tag: 'hr' });
+    elements.push({
+      tag: 'markdown',
+      content: preprocessFeishuMarkdown(processSummary),
+      text_size: 'notation',
+    });
+  }
+
   // Footer
   if (footer) {
     const parts: string[] = [];
     if (footer.status) parts.push(footer.status);
     if (footer.elapsed) parts.push(footer.elapsed);
     if (parts.length > 0) {
-      elements.push({ tag: 'hr' });
+      if (!processSummary) {
+        elements.push({ tag: 'hr' });
+      }
       elements.push({
         tag: 'markdown',
         content: parts.join(' · '),
@@ -257,6 +314,21 @@ export function buildFinalCardJson(
     config: { wide_screen_mode: true },
     body: { elements },
   });
+}
+
+function buildFinalProcessSummary(tools: ToolCallInfo[], statusHistory?: string[]): string {
+  const sections: string[] = [];
+  const historyBlock = buildStatusHistoryMarkdown(statusHistory);
+  if (historyBlock) {
+    sections.push(`**处理过程**\n${historyBlock}`);
+  }
+
+  if (tools.length > 0) {
+    const recentTools = tools.slice(-4);
+    sections.push(`**工具摘要**\n${buildToolProgressMarkdown(recentTools)}`);
+  }
+
+  return sections.join('\n\n');
 }
 
 /**

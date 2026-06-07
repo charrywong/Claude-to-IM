@@ -59,6 +59,7 @@ interface FeishuCardState {
   toolCalls: ToolCallInfo[];
   thinking: boolean;
   statusText: string | null;
+  statusHistory: string[];
   pendingText: string | null;
   lastUpdateAt: number;
   throttleTimer: ReturnType<typeof setTimeout> | null;
@@ -524,6 +525,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         toolCalls: [],
         thinking: true,
         statusText: initialStatus,
+        statusHistory: [initialStatus],
         pendingText: null,
         lastUpdateAt: 0,
         throttleTimer: null,
@@ -592,6 +594,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       elapsedMs: Date.now() - state.startTime,
       thinking: state.thinking,
       statusText: state.statusText || undefined,
+      statusHistory: state.statusHistory,
     });
 
     // Fire-and-forget: streaming updates are non-critical
@@ -634,6 +637,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       .trim();
     if (!normalized || state.statusText === normalized) return;
     state.statusText = normalized;
+    state.statusHistory = [...state.statusHistory, normalized]
+      .filter((entry, index, arr) => index === 0 || entry !== arr[index - 1])
+      .slice(-6);
     this.updateCardContent(chatId, state.pendingText || '');
   }
 
@@ -679,7 +685,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const { text: finalTextWithoutAssets, assetPaths } = this.extractOutboundSendDirectives(responseText);
       const finalText = finalTextWithoutAssets.trim() || (assetPaths.length > 0 ? 'Attachment sent.' : '');
 
-      const finalCardJson = buildFinalCardJson(finalText, state.toolCalls, footer);
+      const finalCardJson = buildFinalCardJson(finalText, state.toolCalls, footer, {
+        statusHistory: state.statusHistory,
+      });
       try {
         state.sequence++;
         await (this.restClient as any).cardkit.v1.card.settings({

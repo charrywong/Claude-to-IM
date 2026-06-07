@@ -1068,9 +1068,9 @@ async function handleMessage(
     try { adapter.onStreamStatus!(msg.address.chatId, statusText); } catch { /* non-critical */ }
   } : undefined;
 
-  const onToolEvent = supportsToolStreaming ? (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
+  const onToolEvent = supportsToolStreaming ? (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', detail?: string) => {
     if (toolName) {
-      toolCallTracker.set(toolId, { id: toolId, name: toolName, status });
+      toolCallTracker.set(toolId, { id: toolId, name: toolName, status, ...(detail ? { detail } : {}) });
     } else {
       // tool_result doesn't carry name — update existing entry's status
       const existing = toolCallTracker.get(toolId);
