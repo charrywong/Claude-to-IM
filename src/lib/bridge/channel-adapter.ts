@@ -112,6 +112,12 @@ export abstract class BaseChannelAdapter {
   onStreamText?(_chatId: string, _fullText: string): void;
 
   /**
+   * Called when the provider emits a user-visible status update during streaming.
+   * Adapters can use this to show progress before any answer text arrives.
+   */
+  onStreamStatus?(_chatId: string, _statusText: string): void;
+
+  /**
    * Called when tool_use / tool_result events arrive during streaming.
    * Adapter can use this to display tool progress in the streaming card.
    */

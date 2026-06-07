@@ -3,6 +3,7 @@ import type { ToolCallInfo } from '../types.js';
 interface StreamingCardMeta {
   elapsedMs?: number;
   thinking?: boolean;
+  statusText?: string;
 }
 
 /**
@@ -124,6 +125,7 @@ export function formatElapsed(ms: number): string {
 function buildStreamingSummary(text: string, tools: ToolCallInfo[], meta?: StreamingCardMeta): string {
   const elapsed = meta?.elapsedMs != null ? ` · ${formatElapsed(meta.elapsedMs)}` : '';
   const trimmedText = text.trim();
+  const statusText = normalizeStreamingStatusText(meta?.statusText);
   if (trimmedText) return `正在生成回复${elapsed}`;
   if (tools.length > 0) {
     const latestTool = tools[tools.length - 1];
@@ -134,8 +136,24 @@ function buildStreamingSummary(text: string, tools: ToolCallInfo[], meta?: Strea
         : '最近完成';
     return `${latestState}: ${latestTool.name}${elapsed}`;
   }
+  if (statusText) return `${summarizeStatusText(statusText)}${elapsed}`;
   if (meta?.thinking === false) return `正在处理中${elapsed}`;
   return `已接收，正在思考${elapsed}`;
+}
+
+function normalizeStreamingStatusText(statusText?: string): string | null {
+  if (typeof statusText !== 'string') return null;
+  const normalized = statusText
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return normalized || null;
+}
+
+function summarizeStatusText(statusText: string): string {
+  const oneLine = statusText.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= 44) return oneLine;
+  return `${oneLine.slice(0, 41)}...`;
 }
 
 /**
@@ -144,12 +162,15 @@ function buildStreamingSummary(text: string, tools: ToolCallInfo[], meta?: Strea
  */
 export function buildStreamingContent(text: string, tools: ToolCallInfo[], meta?: StreamingCardMeta): string {
   const trimmedText = text.trim();
+  const statusText = normalizeStreamingStatusText(meta?.statusText);
   const recentTools = tools.slice(-6);
   const hiddenToolCount = tools.length - recentTools.length;
   const sections = [`**${buildStreamingSummary(text, tools, meta)}**`];
 
   if (trimmedText) {
     sections.push(trimmedText);
+  } else if (statusText) {
+    sections.push(`**当前状态**\n${statusText}`);
   } else if (tools.length > 0) {
     sections.push('_任务已开始，正在持续执行中。_');
   } else {

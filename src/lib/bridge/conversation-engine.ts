@@ -44,6 +44,7 @@ export type OnPartialText = (fullText: string) => void;
  * Used by bridge-manager to forward tool progress to adapters for real-time display.
  */
 export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => void;
+export type OnStatusUpdate = (statusText: string) => void;
 
 export interface ConversationResult {
   responseText: string;
@@ -107,6 +108,24 @@ function formatBlocksForDelivery(contentBlocks: MessageContentBlock[]): string {
   return parts.join('\n\n').trim();
 }
 
+function normalizeStatusText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return text || null;
+}
+
+function extractStatusText(statusData: Record<string, unknown>): string | null {
+  return (
+    normalizeStatusText(statusData.reasoning) ||
+    normalizeStatusText(statusData.message) ||
+    normalizeStatusText(statusData.status_text) ||
+    normalizeStatusText(statusData.summary)
+  );
+}
+
 /**
  * Process an inbound message: send to Claude, consume the response stream,
  * save to DB, and return the result.
@@ -119,6 +138,7 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  onStatusUpdate?: OnStatusUpdate,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -240,7 +260,7 @@ export async function processMessage(
     // Consume the stream server-side (replicate collectStreamResponse pattern).
     // Permission requests are forwarded immediately via the callback during streaming
     // because the stream blocks until permission is resolved — we can't wait until after.
-    return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText, onToolEvent);
+    return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText, onToolEvent, onStatusUpdate);
   } finally {
     clearInterval(renewalInterval);
     store.releaseSessionLock(sessionId, lockId);
@@ -258,6 +278,7 @@ async function consumeStream(
   onPermissionRequest?: OnPermissionRequest,
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  onStatusUpdate?: OnStatusUpdate,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
   const reader = stream.getReader();
@@ -271,6 +292,7 @@ async function consumeStream(
   const seenToolResultIds = new Set<string>();
   const permissionRequests: PermissionRequestInfo[] = [];
   let capturedSdkSessionId: string | null = null;
+  let lastStatusText: string | null = null;
 
   try {
     while (true) {
@@ -371,13 +393,22 @@ async function consumeStream(
 
           case 'status': {
             try {
-              const statusData = JSON.parse(event.data);
-              if (statusData.session_id) {
+              const parsed = JSON.parse(event.data);
+              if (!parsed || typeof parsed !== 'object') break;
+              const statusData = parsed as Record<string, unknown>;
+              if (typeof statusData.session_id === 'string' && statusData.session_id) {
                 capturedSdkSessionId = statusData.session_id;
                 store.updateSdkSessionId(sessionId, statusData.session_id);
               }
-              if (statusData.model) {
+              if (typeof statusData.model === 'string' && statusData.model) {
                 store.updateSessionModel(sessionId, statusData.model);
+              }
+              if (onStatusUpdate) {
+                const statusText = extractStatusText(statusData);
+                if (statusText && statusText !== lastStatusText) {
+                  lastStatusText = statusText;
+                  try { onStatusUpdate(statusText); } catch { /* non-critical */ }
+                }
               }
             } catch { /* skip */ }
             break;

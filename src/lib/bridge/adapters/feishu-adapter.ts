@@ -58,6 +58,7 @@ interface FeishuCardState {
   startTime: number;
   toolCalls: ToolCallInfo[];
   thinking: boolean;
+  statusText: string | null;
   pendingText: string | null;
   lastUpdateAt: number;
   throttleTimer: ReturnType<typeof setTimeout> | null;
@@ -67,7 +68,7 @@ interface FeishuCardState {
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 200;
 /** Streaming card heartbeat interval (ms) when no new text arrives. */
-const CARD_HEARTBEAT_MS = 5000;
+const CARD_HEARTBEAT_MS = 3000;
 
 /** Shape of the SDK's im.message.receive_v1 event data. */
 type FeishuMessageEventData = {
@@ -456,23 +457,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     try {
       // Step 1: Create card via CardKit v1
-      const cardBody = {
-        schema: '2.0',
-        config: {
-          streaming_mode: true,
-          wide_screen_mode: true,
-          summary: { content: '思考中...' },
-        },
-        body: {
-          elements: [{
-            tag: 'markdown',
-            content: '💭 Thinking...',
-            text_align: 'left',
-            text_size: 'normal',
-            element_id: 'streaming_content',
-          }],
-        },
-      };
+      const initialStatus = '任务已接收，正在准备上下文。';
+      const cardBody = JSON.parse(buildStreamingCardJson('', [], {
+        thinking: true,
+        elapsedMs: 0,
+        statusText: initialStatus,
+      }));
 
       const createResp = await (this.restClient as any).cardkit.v1.card.create({
         data: { type: 'card_json', data: JSON.stringify(cardBody) },
@@ -533,6 +523,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         startTime: Date.now(),
         toolCalls: [],
         thinking: true,
+        statusText: initialStatus,
         pendingText: null,
         lastUpdateAt: 0,
         throttleTimer: null,
@@ -600,6 +591,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const cardJson = buildStreamingCardJson(state.pendingText || '', state.toolCalls, {
       elapsedMs: Date.now() - state.startTime,
       thinking: state.thinking,
+      statusText: state.statusText || undefined,
     });
 
     // Fire-and-forget: streaming updates are non-critical
@@ -627,6 +619,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!state) return;
     state.toolCalls = tools.slice(-12);
     // Trigger a content flush with current text + updated tools
+    this.updateCardContent(chatId, state.pendingText || '');
+  }
+
+  /**
+   * Update the current user-visible status text in the streaming card.
+   */
+  private updateStatusText(chatId: string, statusText: string): void {
+    const state = this.activeCards.get(chatId);
+    if (!state) return;
+    const normalized = statusText
+      .replace(/\r\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    if (!normalized || state.statusText === normalized) return;
+    state.statusText = normalized;
     this.updateCardContent(chatId, state.pendingText || '');
   }
 
@@ -762,6 +769,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
     this.updateCardContent(chatId, fullText);
+  }
+
+  onStreamStatus(chatId: string, statusText: string): void {
+    if (!this.activeCards.has(chatId)) {
+      const messageId = this.lastIncomingMessageId.get(chatId);
+      this.createStreamingCard(chatId, messageId).then((ok) => {
+        if (ok) this.updateStatusText(chatId, statusText);
+      }).catch(() => {});
+      return;
+    }
+    this.updateStatusText(chatId, statusText);
   }
 
   onToolEvent(chatId: string, tools: ToolCallInfo[]): void {

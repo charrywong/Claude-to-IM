@@ -1051,17 +1051,24 @@ async function handleMessage(
 
   // ── Streaming card setup (Feishu CardKit v2) ──────────────────
   // If the adapter supports streaming cards (e.g. Feishu), wire up
-  // onStreamText, onToolEvent, and onStreamEnd callbacks.
+  // onStreamText, onStreamStatus, onToolEvent, and onStreamEnd callbacks.
   // These run in parallel with the existing preview system — Feishu
   // uses cards instead of message edit for streaming.
-  const hasStreamingCards = typeof adapter.onStreamText === 'function';
+  const supportsStreamingText = typeof adapter.onStreamText === 'function';
+  const supportsStreamingStatus = typeof adapter.onStreamStatus === 'function';
+  const supportsToolStreaming = typeof adapter.onToolEvent === 'function';
+  const hasStreamingCards = supportsStreamingText || supportsStreamingStatus || supportsToolStreaming || typeof adapter.onStreamEnd === 'function';
   const toolCallTracker = new Map<string, ToolCallInfo>();
 
-  const onStreamCardText = hasStreamingCards ? (fullText: string) => {
+  const onStreamCardText = supportsStreamingText ? (fullText: string) => {
     try { adapter.onStreamText!(msg.address.chatId, fullText); } catch { /* non-critical */ }
   } : undefined;
 
-  const onToolEvent = hasStreamingCards ? (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
+  const onStreamStatus = supportsStreamingStatus ? (statusText: string) => {
+    try { adapter.onStreamStatus!(msg.address.chatId, statusText); } catch { /* non-critical */ }
+  } : undefined;
+
+  const onToolEvent = supportsToolStreaming ? (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
     if (toolName) {
       toolCallTracker.set(toolId, { id: toolId, name: toolName, status });
     } else {
@@ -1105,7 +1112,7 @@ async function handleMessage(
         perm.suggestions,
         msg.messageId,
       );
-    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent);
+    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent, onStreamStatus);
 
     const parsedSchedules = parseScheduleDirectives(result.responseText);
     const createdTasks = materializeScheduleDirectives(

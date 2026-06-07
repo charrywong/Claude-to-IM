@@ -32,6 +32,18 @@ describe('feishu streaming markdown helpers', () => {
     assert.match(content, /正在执行: Edit · 12\.3s/);
   });
 
+  it('shows status text before the first reply token arrives', () => {
+    const content = buildStreamingContent('', [], {
+      thinking: true,
+      elapsedMs: 8_000,
+      statusText: '正在请求模型响应。',
+    });
+
+    assert.match(content, /正在请求模型响应。 · 8\.0s/);
+    assert.match(content, /当前状态/);
+    assert.match(content, /正在请求模型响应。/);
+  });
+
   it('uses dynamic summary in streaming card json', () => {
     const cardJson = buildStreamingCardJson('', [
       { id: '1', name: 'Bash', status: 'complete' },
