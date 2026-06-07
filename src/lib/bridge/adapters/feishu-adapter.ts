@@ -61,10 +61,13 @@ interface FeishuCardState {
   pendingText: string | null;
   lastUpdateAt: number;
   throttleTimer: ReturnType<typeof setTimeout> | null;
+  heartbeatTimer: ReturnType<typeof setInterval> | null;
 }
 
 /** Streaming card throttle interval (ms). */
 const CARD_THROTTLE_MS = 200;
+/** Streaming card heartbeat interval (ms) when no new text arrives. */
+const CARD_HEARTBEAT_MS = 5000;
 
 /** Shape of the SDK's im.message.receive_v1 event data. */
 type FeishuMessageEventData = {
@@ -144,6 +147,22 @@ function extractFeishuErrorCode(err: unknown): number | undefined {
 function isMissingOrWithdrawnMessageError(err: unknown): boolean {
   const code = extractFeishuErrorCode(err);
   return code === 231003 || code === 230011;
+}
+
+function extractFeishuErrorMessage(err: unknown): string {
+  if (!err || typeof err !== 'object') return '';
+  const responseMsg = (err as { response?: { data?: { msg?: unknown } } }).response?.data?.msg;
+  if (typeof responseMsg === 'string') return responseMsg;
+  const directMsg = (err as { msg?: unknown }).msg;
+  if (typeof directMsg === 'string') return directMsg;
+  const errorMessage = (err as { message?: unknown }).message;
+  return typeof errorMessage === 'string' ? errorMessage : '';
+}
+
+function isInvalidCardEntityReplyError(err: unknown): boolean {
+  const code = extractFeishuErrorCode(err);
+  if (code !== 230099) return false;
+  return /cardid is invalid/i.test(extractFeishuErrorMessage(err));
 }
 
 export class FeishuAdapter extends BaseChannelAdapter {
@@ -279,6 +298,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Clean up active cards
     for (const [, state] of this.activeCards) {
       if (state.throttleTimer) clearTimeout(state.throttleTimer);
+      if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
     }
     this.activeCards.clear();
     this.cardCreatePromises.clear();
@@ -473,8 +493,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
             data: { content: cardContent, msg_type: 'interactive' },
           });
         } catch (err) {
-          if (!isMissingOrWithdrawnMessageError(err)) {
+          if (!isMissingOrWithdrawnMessageError(err) && !isInvalidCardEntityReplyError(err)) {
             throw err;
+          }
+          if (isInvalidCardEntityReplyError(err)) {
+            console.warn('[feishu-adapter] Reply with CardKit card entity failed, falling back to send-as-chat:', extractFeishuErrorMessage(err));
           }
           msgResp = await this.restClient.im.message.create({
             params: { receive_id_type: 'chat_id' },
@@ -503,7 +526,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
 
       // Store card state
-      this.activeCards.set(chatId, {
+      const state: FeishuCardState = {
         cardId,
         messageId,
         sequence: 0,
@@ -513,7 +536,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
         pendingText: null,
         lastUpdateAt: 0,
         throttleTimer: null,
-      });
+        heartbeatTimer: null,
+      };
+      state.heartbeatTimer = setInterval(() => {
+        if (!this.activeCards.has(chatId)) {
+          if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+          state.heartbeatTimer = null;
+          return;
+        }
+        this.flushCardUpdate(chatId);
+      }, CARD_HEARTBEAT_MS);
+      this.activeCards.set(chatId, state);
 
       console.log(`[feishu-adapter] Streaming card created: cardId=${cardId}, msgId=${messageId}`);
       return true;
@@ -564,7 +597,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!state || !this.restClient) return;
 
     state.sequence++;
-    const cardJson = buildStreamingCardJson(state.pendingText || '', state.toolCalls);
+    const cardJson = buildStreamingCardJson(state.pendingText || '', state.toolCalls, {
+      elapsedMs: Date.now() - state.startTime,
+      thinking: state.thinking,
+    });
 
     // Fire-and-forget: streaming updates are non-critical
     (this.restClient as any).cardkit.v1.card.update({
@@ -589,7 +625,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private updateToolProgress(chatId: string, tools: ToolCallInfo[]): void {
     const state = this.activeCards.get(chatId);
     if (!state) return;
-    state.toolCalls = tools;
+    state.toolCalls = tools.slice(-12);
     // Trigger a content flush with current text + updated tools
     this.updateCardContent(chatId, state.pendingText || '');
   }
@@ -615,6 +651,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (state.throttleTimer) {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
+    }
+    if (state.heartbeatTimer) {
+      clearInterval(state.heartbeatTimer);
+      state.heartbeatTimer = null;
     }
 
     try {
@@ -692,6 +732,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!state) return;
     if (state.throttleTimer) {
       clearTimeout(state.throttleTimer);
+    }
+    if (state.heartbeatTimer) {
+      clearInterval(state.heartbeatTimer);
     }
     this.activeCards.delete(chatId);
   }

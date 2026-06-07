@@ -1,5 +1,10 @@
 import type { ToolCallInfo } from '../types.js';
 
+interface StreamingCardMeta {
+  elapsedMs?: number;
+  thinking?: boolean;
+}
+
 /**
  * Feishu-specific Markdown processing.
  *
@@ -116,31 +121,69 @@ export function formatElapsed(ms: number): string {
   return `${min}m ${remSec}s`;
 }
 
+function buildStreamingSummary(text: string, tools: ToolCallInfo[], meta?: StreamingCardMeta): string {
+  const elapsed = meta?.elapsedMs != null ? ` · ${formatElapsed(meta.elapsedMs)}` : '';
+  const trimmedText = text.trim();
+  if (trimmedText) return `正在生成回复${elapsed}`;
+  if (tools.length > 0) {
+    const latestTool = tools[tools.length - 1];
+    const latestState = latestTool.status === 'error'
+      ? '最近出错'
+      : latestTool.status === 'running'
+        ? '正在执行'
+        : '最近完成';
+    return `${latestState}: ${latestTool.name}${elapsed}`;
+  }
+  if (meta?.thinking === false) return `正在处理中${elapsed}`;
+  return `已接收，正在思考${elapsed}`;
+}
+
 /**
  * Build the body elements array for a streaming card update.
  * Combines main text content with tool progress.
  */
-export function buildStreamingContent(text: string, tools: ToolCallInfo[]): string {
-  void tools;
-  return text || '💭 Thinking...';
+export function buildStreamingContent(text: string, tools: ToolCallInfo[], meta?: StreamingCardMeta): string {
+  const trimmedText = text.trim();
+  const recentTools = tools.slice(-6);
+  const hiddenToolCount = tools.length - recentTools.length;
+  const sections = [`**${buildStreamingSummary(text, tools, meta)}**`];
+
+  if (trimmedText) {
+    sections.push(trimmedText);
+  } else if (tools.length > 0) {
+    sections.push('_任务已开始，正在持续执行中。_');
+  } else {
+    sections.push('_任务已开始，当前还在分析阶段。_');
+  }
+
+  if (recentTools.length > 0) {
+    let toolBlock = `**最近进度**\n${buildToolProgressMarkdown(recentTools)}`;
+    if (hiddenToolCount > 0) {
+      toolBlock += `\n… 另有 ${hiddenToolCount} 项较早进度`;
+    }
+    sections.push(toolBlock);
+  }
+
+  return sections.join('\n\n');
 }
 
 /**
  * Build the full streaming card JSON (schema 2.0) for incremental updates.
  */
-export function buildStreamingCardJson(text: string, tools: ToolCallInfo[]): string {
+export function buildStreamingCardJson(text: string, tools: ToolCallInfo[], meta?: StreamingCardMeta): string {
+  const summary = buildStreamingSummary(text, tools, meta);
   return JSON.stringify({
     schema: '2.0',
     config: {
       streaming_mode: true,
       wide_screen_mode: true,
-      summary: { content: '思考中...' },
+      summary: { content: summary },
     },
     body: {
       elements: [
         {
           tag: 'markdown',
-          content: preprocessFeishuMarkdown(buildStreamingContent(text, tools)),
+          content: preprocessFeishuMarkdown(buildStreamingContent(text, tools, meta)),
           text_align: 'left',
           text_size: 'normal',
           element_id: 'streaming_content',
